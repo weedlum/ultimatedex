@@ -123,8 +123,9 @@ const state = {
     dex: { types: [], sort: 'num', dir: 1, q: '' },
     moves: { types: [], cat: null, sort: 'name', dir: 1, q: '' },
     abil: { q: '' },
-    items: { q: '' },
+    items: { q: '', cat: null },
     trainers: { q: '' },
+    habitats: { q: '' },
   },
 };
 function isHack(prof) { prof = prof ?? state.profile; return prof === 'rr' || String(prof).startsWith('h:') || String(prof).startsWith('b:'); }
@@ -262,7 +263,7 @@ function speciesList(prof) {
     const OFFSET = { base: 0, basin: 10000, event: 20000 };
     const LABEL = { base: '#', basin: 'Basin #', event: 'Event #' };
     const seen = new Map();
-    for (const e of D.pokopia || []) {
+    for (const e of (D.pokopia || {}).roster || []) {
       const psid = D.dex[e.slug] ? e.slug : rrPsId(e.name);
       if (!psid || !D.dex[psid] || !D.dex[psid].baseStats) continue;
       if (seen.has(psid)) { seen.get(psid).pokopia.sets.push(e.set); continue; }
@@ -270,7 +271,7 @@ function speciesList(prof) {
       if (!r) continue;
       r.num = OFFSET[e.set] + e.n;
       r.dexno = LABEL[e.set] + String(e.n).padStart(3, '0');
-      r.pokopia = { spec: e.spec, sets: [e.set] };
+      r.pokopia = { spec: e.spec, sets: [e.set], slug: e.slug };
       seen.set(psid, r);
       out.push(r);
     }
@@ -874,8 +875,10 @@ function pickerSheet(title, items, onPick, extras) {
 function render() {
   closeAllSheets();
   if (state.tab === 'trainers' && !trainersFor().length) state.tab = 'dex';
+  if (state.tab === 'habitats' && state.profile !== 'pokopia') state.tab = 'dex';
   app.textContent = '';
-  ({ dex: viewDex, moves: viewMoves, abil: viewAbilities, items: viewItems, teams: viewTeams, trainers: viewTrainers }[state.tab] || viewDex)();
+  ({ dex: viewDex, moves: viewMoves, abil: viewAbilities, items: viewItems, teams: viewTeams,
+    trainers: viewTrainers, habitats: viewHabitats }[state.tab] || viewDex)();
   app.append(buildNav());
 }
 function buildNav() {
@@ -884,6 +887,7 @@ function buildNav() {
     ['items', '🎒', 'Items'],
   ];
   if (trainersFor().length) tabs.push(['trainers', '🥊', 'Trainers']);
+  if (state.profile === 'pokopia') tabs.push(['habitats', '🌿', 'Habitats']);
   tabs.push(['teams', '⚔️', 'Teams']);
   return el('nav', {}, tabs.map(([id, ic, label]) =>
     el('button', { class: state.tab === id ? 'on' : '', onclick: () => { state.tab = id; render(); } },
@@ -1097,9 +1101,14 @@ function openSpecies(rec) {
 
     if (rec.pokopia) {
       const SETS = { base: 'Base game', basin: 'Bubbly Basin (Expansion Pass)', event: 'Event' };
+      const habs = ((D.pokopia || {}).habitats || []).filter((h) => h.mons.includes(rec.pokopia.slug));
       page.append(el('div', { class: 'card' }, el('h3', {}, 'Pokopia'),
         el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Specialty'), el('span', {}, rec.pokopia.spec || '—')),
-        el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Available in'), el('span', {}, rec.pokopia.sets.map((s) => SETS[s] || s).join(', ')))));
+        el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Available in'), el('span', {}, rec.pokopia.sets.map((s) => SETS[s] || s).join(', '))),
+        habs.length ? el('div', { style: 'padding-top:8px' },
+          el('div', { class: 'k muted', style: 'font-size:12px;margin-bottom:6px' }, 'Attracted by ' + habs.length + ' habitats'),
+          el('div', { class: 'moveinline' }, habs.map((h) =>
+            el('button', { class: 'chip', onclick: () => openHabitat(h) }, h.name)))) : null));
     }
 
     // stats (gen 1 had a unified Special stat)
@@ -1329,6 +1338,7 @@ function openAbility(a) {
 
 // ---------- Items tab ----------
 function viewItems() {
+  if (state.profile === 'pokopia') return viewPokopiaCrafting();
   const f = state.f.items;
   const list = el('div', { class: 'list' });
   const count = el('div', { class: 'count' });
@@ -1347,6 +1357,43 @@ function viewItems() {
   };
   app.append(listHeader('Items', 'items'), el('main', {}, count, list));
   refreshers.list();
+}
+function viewPokopiaCrafting() {
+  const f = state.f.items;
+  const all = (D.pokopia || {}).crafting || [];
+  const cats = [...new Set(all.map((x) => x.cat))];
+  function chips() {
+    return el('div', { class: 'chiprow' }, cats.map((c) =>
+      el('button', { class: 'chip' + (f.cat === c ? ' on' : ''), style: f.cat === c ? 'background:var(--accent2)' : '',
+        onclick: () => { f.cat = f.cat === c ? null : c; render(); } }, c)));
+  }
+  const list = el('div', { class: 'list' });
+  const count = el('div', { class: 'count' });
+  refreshers.list = () => {
+    list.textContent = '';
+    let items = all;
+    if (f.cat) items = items.filter((x) => x.cat === f.cat);
+    const q = toID(f.q);
+    if (q) items = items.filter((x) => toID(x.name).includes(q) || toID(x.mats.map((m) => m.name).join()).includes(q));
+    count.textContent = items.length + ' recipes · Pokopia';
+    chunkList(list, items, (x) =>
+      el('button', { class: 'row', onclick: () => openRecipe(x) },
+        el('div', { class: 'body' },
+          el('div', { class: 'name' }, x.name),
+          el('div', { class: 'sub' }, x.mats.map((m) => m.name + ' ×' + m.qty).join(', ') || x.unlock)),
+        el('div', { class: 'end' }, el('span', { class: 'stat' }, x.cat))));
+  };
+  app.append(listHeader('Crafting', 'items', chips), el('main', {}, count, list));
+  refreshers.list();
+}
+function openRecipe(x) {
+  openSheet(x.name, (body) => {
+    body.append(el('div', { class: 'page' },
+      el('div', { class: 'card' }, el('h3', {}, x.cat),
+        x.unlock ? el('div', { class: 'kv' }, el('span', { class: 'k' }, 'How to unlock'), el('span', { style: 'text-align:right' }, x.unlock)) : null),
+      x.mats.length ? el('div', { class: 'card' }, el('h3', {}, 'Materials'),
+        x.mats.map((m) => el('div', { class: 'kv' }, el('span', { class: 'k' }, m.name), el('span', {}, '×' + m.qty)))) : null));
+  });
 }
 function openItem(it) {
   openSheet(it.name, (body) => {
@@ -1437,6 +1484,47 @@ function openTrainer(t, modes) {
       if (!partyWrap.children.length) partyWrap.append(el('div', { class: 'empty' }, 'No party data.'));
     }
     drawParty();
+  });
+}
+
+// ---------- Pokopia habitats ----------
+function pokopiaSpeciesBySlug() {
+  const map = new Map();
+  for (const r of speciesList('pokopia')) if (r.pokopia) map.set(r.pokopia.slug, r);
+  return map;
+}
+function viewHabitats() {
+  const f = state.f.habitats;
+  const list = el('div', { class: 'list' });
+  const count = el('div', { class: 'count' });
+  refreshers.list = () => {
+    list.textContent = '';
+    let items = (D.pokopia || {}).habitats || [];
+    const q = toID(f.q);
+    if (q) items = items.filter((x) => toID(x.name).includes(q) || toID(x.desc).includes(q));
+    count.textContent = items.length + ' habitats · Pokopia';
+    chunkList(list, items, (x) =>
+      el('button', { class: 'row', onclick: () => openHabitat(x) },
+        el('div', { class: 'body' },
+          el('div', { class: 'name' }, x.name + (x.set !== 'main' ? ' · ' + (x.set === 'basin' ? 'Basin' : 'Event') : '')),
+          el('div', { class: 'sub' }, x.desc)),
+        el('div', { class: 'end' }, el('span', { class: 'stat' }, x.mons.length + ' mons'))));
+  };
+  app.append(listHeader('Habitats', 'habitats'), el('main', {}, count, list));
+  refreshers.list();
+}
+function openHabitat(x) {
+  openSheet(x.name, (body) => {
+    const bySlug = pokopiaSpeciesBySlug();
+    const mons = x.mons.map((s) => bySlug.get(s)).filter(Boolean);
+    const list = el('div', { class: 'list' });
+    body.append(el('div', { class: 'page' },
+      el('div', { class: 'card' }, el('h3', {}, 'Habitat #' + String(x.n).padStart(3, '0') + (x.set !== 'main' ? ' · ' + x.set : '')),
+        el('div', { class: 'flavor' }, x.desc || '—')),
+      x.reqs.length ? el('div', { class: 'card' }, el('h3', {}, 'Build Requirements'),
+        x.reqs.map((r) => el('div', { class: 'kv' }, el('span', { class: 'k' }, r.name), el('span', {}, '×' + r.qty)))) : null,
+      el('div', { class: 'card' }, el('h3', {}, `Attracts (${mons.length})`), list)));
+    chunkList(list, mons, speciesRow, 40);
   });
 }
 

@@ -186,11 +186,11 @@ for (const [key, name] of [['unbound', 'Unbound'], ['rowe', 'R.O.W.E'], ['ie', '
 }
 
 // --- Pokopia roster (scraped from Serebii's list pages) ---------------------
+const dec = (s) => String(s).replace(/&eacute;/g, 'é').replace(/&Eacute;/g, 'É').replace(/&amp;/g, '&')
+  .replace(/&#(\d+);/g, (m, d) => String.fromCharCode(+d)).replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
 function parsePokopia(file, set) {
   let h;
   try { h = read(file); } catch { return []; }
-  const dec = (s) => s.replace(/&eacute;/g, 'é').replace(/&Eacute;/g, 'É').replace(/&amp;/g, '&')
-    .replace(/&#(\d+);/g, (m, d) => String.fromCharCode(+d)).replace(/<[^>]+>/g, '').trim();
   const out = [];
   for (const c of h.split('<td class="cen">#').slice(1)) {
     const n = parseInt(c);
@@ -208,7 +208,61 @@ const pokopia = [
 ];
 console.log(`pokopia: ${pokopia.filter((x) => x.set === 'base').length} base, ${pokopia.filter((x) => x.set === 'basin').length} basin, ${pokopia.filter((x) => x.set === 'event').length} event`);
 
-const payload = { dex, moves, learnsets, abilities, items, typechart, iconIdx, rr, mods, flavor, hacks, pokopia };
+// habitat dex: list page for names/descriptions, detail pages for build
+// requirements + which Pokémon each habitat attracts
+const habitats = [];
+try {
+  const h = read('data/pokopia-habitats.html');
+  const basinAt = h.indexOf('<a name="basin">'), eventAt = h.indexOf('<a name="event">');
+  let pos = 0;
+  for (const c of h.split('<td class="cen">#').slice(1)) {
+    pos = h.indexOf('<td class="cen">#' + c.slice(0, 8), pos) + 1;
+    const n = parseInt(c);
+    const slug = (c.match(/habitatdex\/([a-z0-9-]+)\.shtml/) || [])[1];
+    const name = dec((c.match(/<u>([^<]+)<\/u>/) || [])[1] || '');
+    const desc = dec((c.match(/<td class="fooinfo">([^<]+)<\/td>\s*<\/tr>/) || [])[1] || '');
+    if (!n || !slug || !name) continue;
+    const set = eventAt >= 0 && pos > eventAt ? 'event' : basinAt >= 0 && pos > basinAt ? 'basin' : 'main';
+    const entry = { n, slug, name, desc, set, reqs: [], mons: [] };
+    try {
+      const d = read(`data/pokopia-habitatdex/${slug}.html`);
+      const reqSec = d.split('<h2>Requirements</h2>')[1]?.split('</table>')[0] || '';
+      for (const m of reqSec.matchAll(/items\/[a-z0-9]+\.shtml"><u>([^<]+)<\/u><\/a><\/td>\s*<td class="fooinfo">(\d+)/g)) {
+        entry.reqs.push({ name: dec(m[1]), qty: +m[2] });
+      }
+      const monSec = d.split('Available Pok')[1] || '';
+      entry.mons = [...new Set([...monSec.matchAll(/pokedex\/([a-z0-9]+)\.shtml/g)].map((m) => m[1]))];
+    } catch {}
+    habitats.push(entry);
+  }
+} catch (e) { console.warn('habitats skipped:', e.message); }
+console.log(`pokopia habitats: ${habitats.length} (${habitats.filter((x) => x.mons.length).length} with mon lists)`);
+
+// crafting/cooking recipe dex
+const crafting = [];
+for (const [file, defaultCat] of [['data/pokopia-crafting.html', null], ['data/pokopia-cooking.html', 'Meals']]) {
+  let h;
+  try { h = read(file); } catch { continue; }
+  const sections = h.split(/<h2>(?:<a name="[^"]*"><\/a>)?List of /).slice(1);
+  for (const sec of sections) {
+    const cat = defaultCat || dec(sec.split('</h2>')[0]).replace(/ cookable$/, '');
+    for (const row of sec.split('<tr><td class="cen"><a href="items/').slice(1)) {
+      const slug = (row.match(/^([a-z0-9]+)\.shtml/) || [])[1];
+      const name = dec((row.match(/alt="([^"]+)"/) || [])[1] || '');
+      if (!slug || !name) continue;
+      const unlock = dec((row.match(/<td class="fooinfo">([\s\S]*?)<\/td>/) || [])[1] || '').slice(0, 120);
+      const mats = [];
+      for (const m of row.matchAll(/items\/[a-z0-9]+\.shtml"><u>([^<]+)<\/u><\/a> \* (\d+)/g)) {
+        mats.push({ name: dec(m[1]), qty: +m[2] });
+      }
+      crafting.push({ slug, name, cat, unlock, mats });
+    }
+  }
+}
+console.log(`pokopia crafting: ${crafting.length} recipes in ${new Set(crafting.map((c) => c.cat)).size} categories`);
+
+const payload = { dex, moves, learnsets, abilities, items, typechart, iconIdx, rr, mods, flavor, hacks,
+  pokopia: { roster: pokopia, habitats, crafting } };
 const json = JSON.stringify(payload);
 const gz = zlib.gzipSync(json, { level: 9 });
 const b64 = gz.toString('base64');
