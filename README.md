@@ -17,8 +17,21 @@ accounts, works offline. Covers all official generations plus **Radical Red**
 - **Moves / Abilities / Items** browsers with full descriptions and reverse
   lookups ("learned by", "Pokémon with this ability").
 - **Team builder**: 6-slot teams per dex profile with ability/item/nature/level/
-  legal-move pickers, defensive coverage grid, and Showdown-format export.
-  Teams persist in localStorage.
+  legal-move pickers, **EV/IV spreads with live computed stats**, shiny flag,
+  defensive coverage grid, and Showdown-format export. Teams persist in
+  localStorage.
+- **Game-accurate generations**: gen profiles apply Showdown's per-gen diffs —
+  base stat changes, retypings (pre-Fairy Clefairy), move power/accuracy changes
+  (95 BP Thunderbolt through Gen 5), the unified Special stat in Gen 1, and
+  era-correct type charts. Dex flavor text comes from that generation's games.
+- **Trainer browser** (RR/custom hacks): every trainer's full party — Normal and
+  Hardcore modes — with items, abilities, natures, EVs/IVs, and moves.
+- **Rom-hack importer**: load any RRDex-format `data.js`/JSON (the format behind
+  many hack dex sites) from a file; it becomes a selectable dex profile stored
+  in IndexedDB, including fakemon sprites if present.
+- **3D renders + shinies**: detail pages prefer official Pokémon HOME renders,
+  falling back to Showdown's animated models, pixel sprites, then the embedded
+  icon sheet. Every species page and team slot has a shiny toggle.
 
 ## Build
 

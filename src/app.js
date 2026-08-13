@@ -26,6 +26,8 @@ const TYPE_COLORS = {
   Rock:'#B6A136',Ghost:'#735797',Dragon:'#6F35FC',Dark:'#705746',Steel:'#8f8fad',Fairy:'#cf6d9d',
   Stellar:'#40B5A5','???':'#68A090'
 };
+// Pre-physical/special-split (gens 1-3): category is determined by the type.
+const PHYS_TYPES = new Set(['Normal','Fighting','Flying','Ground','Rock','Bug','Ghost','Poison','Steel']);
 const GEN_CAPS = [0,151,251,386,493,649,721,809,905,1025];
 const MOVE_CAPS = [0,165,251,354,467,559,621,742,826,100000];
 const STAT_KEYS = ['hp','atk','def','spa','spd','spe'];
@@ -40,13 +42,8 @@ function natureFx(name) {
 }
 const RR_MULT = { 0: 1, 1: 0, 5: 0.5, 20: 2 };
 const OFF_MULT = { 0: 1, 1: 2, 2: 0.5, 3: 0 };
-const PROFILES = [
-  ...[1,2,3,4,5,6,7,8,9].map((g) => ({ id: String(g), label: 'Gen ' + g })),
-  { id: 'nat', label: 'National Dex' },
-  { id: 'rr', label: 'Radical Red' },
-];
 
-// name -> showdown id, for icon/sprite lookups from RR names
+// name -> showdown id, for icon/sprite lookups from hack names
 const nameToPsId = {};
 for (const id in D.dex) nameToPsId[toID(D.dex[id].name)] = id;
 function rrPsId(name) {
@@ -61,65 +58,165 @@ function rrPsId(name) {
   return null;
 }
 
-// ============================== state ====================================
+// ============================== state / profiles =========================
 const store = {
   get(k, d) { try { const v = JSON.parse(localStorage.getItem('ud.' + k)); return v == null ? d : v; } catch { return d; } },
   set(k, v) { try { localStorage.setItem('ud.' + k, JSON.stringify(v)); } catch {} },
 };
+
+// custom rom-hack profiles live in IndexedDB (too big for localStorage)
+let customs = {};
+function idb() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open('ultimatedex', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('profiles', { keyPath: 'id' });
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function idbAll() {
+  const db = await idb();
+  return new Promise((res, rej) => {
+    const q = db.transaction('profiles').objectStore('profiles').getAll();
+    q.onsuccess = () => res(q.result || []);
+    q.onerror = () => rej(q.error);
+  });
+}
+async function idbPut(rec) {
+  const db = await idb();
+  return new Promise((res, rej) => {
+    const q = db.transaction('profiles', 'readwrite').objectStore('profiles').put(rec);
+    q.onsuccess = res; q.onerror = () => rej(q.error);
+  });
+}
+async function idbDel(id) {
+  const db = await idb();
+  return new Promise((res, rej) => {
+    const q = db.transaction('profiles', 'readwrite').objectStore('profiles').delete(id);
+    q.onsuccess = res; q.onerror = () => rej(q.error);
+  });
+}
+// Never let a stalled IndexedDB (private mode, file://, Safari quirks) block boot.
+try {
+  const loaded = await Promise.race([idbAll(), new Promise((res) => setTimeout(() => res(null), 2000))]);
+  if (loaded) for (const p of loaded) customs[p.id] = p;
+} catch {}
+
 const state = {
   tab: 'dex',
   profile: store.get('profile', 'nat'),
-  teamOpen: null, // index of team being edited
+  teamOpen: null,
   f: {
     dex: { types: [], sort: 'num', dir: 1, q: '' },
     moves: { types: [], cat: null, sort: 'name', dir: 1, q: '' },
     abil: { q: '' },
     items: { q: '' },
+    trainers: { q: '' },
   },
 };
-function profGen(prof) { const p = prof ?? state.profile; return p === 'nat' || p === 'rr' ? 9 : +p; }
-function profLabel(p) { return (PROFILES.find((x) => x.id === (p ?? state.profile)) || {}).label || p; }
+function isHack(prof) { prof = prof ?? state.profile; return prof === 'rr' || String(prof).startsWith('h:'); }
+function HD(prof) {
+  prof = prof ?? state.profile;
+  if (prof === 'rr') return D.rr;
+  return customs[prof] ? customs[prof].data : null;
+}
+if (isHack(state.profile) && !HD(state.profile)) state.profile = 'nat';
+function profGen(prof) { const p = prof ?? state.profile; return p === 'nat' || isHack(p) ? 9 : +p; }
+function profiles() {
+  return [
+    ...[1,2,3,4,5,6,7,8,9].map((g) => ({ id: String(g), label: 'Gen ' + g, group: 'Official' })),
+    { id: 'nat', label: 'National Dex', group: 'Official' },
+    { id: 'rr', label: 'Radical Red', group: 'Rom-hacks' },
+    ...Object.values(customs).map((p) => ({ id: p.id, label: p.name, group: 'Rom-hacks' })),
+  ];
+}
+function profLabel(p) { return (profiles().find((x) => x.id === (p ?? state.profile)) || {}).label || p; }
+function typesFor(prof) {
+  prof = prof ?? state.profile;
+  if (isHack(prof)) {
+    const hd = HD(prof);
+    return hd ? Object.values(hd.types).map((t) => t.name).filter((n) => n && n !== '???' && n !== 'Mystery') : TYPES;
+  }
+  const g = profGen(prof);
+  if (g === 1) return TYPES.filter((t) => !['Dark', 'Steel', 'Fairy'].includes(t));
+  if (g < 6) return TYPES.filter((t) => t !== 'Fairy');
+  return TYPES;
+}
+
+// ---------- per-generation data (Showdown mod diff chains) ----------
+const modCache = {};
+function modsFor(prof) {
+  prof = prof ?? state.profile;
+  if (isHack(prof)) return null;
+  const g = profGen(prof);
+  if (g >= 9 || (prof ?? state.profile) === 'nat') return null;
+  if (modCache[g]) return modCache[g];
+  const acc = { dex: {}, moves: {}, typechart: {} };
+  for (let x = 8; x >= g; x--) { // lower gens applied later so they win
+    const m = D.mods[x];
+    if (!m) continue;
+    for (const sec in acc) {
+      const src = m[sec];
+      if (!src) continue;
+      for (const id in src) acc[sec][id] = Object.assign({}, acc[sec][id], src[id]);
+    }
+  }
+  return (modCache[g] = acc);
+}
 
 // ============================== records ==================================
 const abilityByName = {};
 for (const id in D.abilities) abilityByName[D.abilities[id].name] = id;
 
-function offSpeciesRec(id) {
-  const e = D.dex[id];
-  if (!e) return null;
+function offSpeciesRec(id, prof) {
+  prof = prof ?? state.profile;
+  const base = D.dex[id];
+  if (!base) return null;
+  const ov = (modsFor(prof) || {}).dex;
+  const e = ov && ov[id] ? Object.assign({}, base, ov[id]) : base;
+  const gen = profGen(prof);
   const abilities = [];
-  for (const slot in e.abilities) {
-    const nm = e.abilities[slot];
-    const a = D.abilities[toID(nm)] || {};
-    abilities.push({ name: nm, hidden: slot === 'H', desc: a.shortDesc || a.desc || '' });
+  if (gen >= 3) {
+    for (const slot in e.abilities) {
+      if (slot === 'H' && gen < 5) continue;
+      const nm = e.abilities[slot];
+      const a = D.abilities[toID(nm)] || {};
+      abilities.push({ name: nm, hidden: slot === 'H', desc: a.shortDesc || a.desc || '' });
+    }
   }
-  const bst = STAT_KEYS.reduce((s, k) => s + e.baseStats[k], 0);
+  const bstKeys = gen === 1 ? ['hp', 'atk', 'def', 'spa', 'spe'] : STAT_KEYS;
+  const bst = bstKeys.reduce((s, k) => s + e.baseStats[k], 0);
   return { key: id, psid: id, name: e.name, num: e.num, dexno: '#' + String(e.num).padStart(4, '0'),
-    types: e.types, stats: e.baseStats, bst, abilities, src: 'off', e };
+    types: e.types, stats: e.baseStats, bst, abilities, src: 'off', prof, e };
 }
-function rrSpeciesRec(id) {
-  const s = D.rr.species[id];
+function hackSpeciesRec(id, prof) {
+  prof = prof ?? state.profile;
+  const hd = HD(prof);
+  const s = hd && hd.species[id];
   if (!s || !s.name) return null;
-  let types = s.type.map((t) => (D.rr.types[t] || {}).name).filter(Boolean);
+  let types = (s.type || []).map((t) => (hd.types[t] || {}).name).filter(Boolean);
   if (types.length === 2 && types[0] === types[1]) types = [types[0]];
   const st = { hp: s.stats[0], atk: s.stats[1], def: s.stats[2], spe: s.stats[3], spa: s.stats[4], spd: s.stats[5] };
   const abilities = [];
   (s.abilities || []).forEach((a, i) => {
     const aid = Array.isArray(a) ? a[0] : a;
     if (!aid) return;
-    const ab = D.rr.abilities[aid];
+    const ab = hd.abilities[aid];
     if (!ab) return;
     const name = ab.names ? ab.names[0] : ab.name;
     if (abilities.some((x) => x.name === name)) return;
-    abilities.push({ name, hidden: i === 2, desc: ab.description || '', rrId: aid });
+    abilities.push({ name, hidden: i === 2, desc: ab.description || '', hackId: aid });
   });
   const bst = STAT_KEYS.reduce((t, k) => t + st[k], 0);
-  return { key: 'r' + id, rrId: +id, psid: rrPsId(s.name), name: s.name, num: s.dexID,
-    dexno: '#' + String(s.dexID).padStart(3, '0'), types, stats: st, bst, abilities, src: 'rr', s };
+  return { key: '#' + id, hackId: +id, psid: rrPsId(s.name), name: s.name, num: s.dexID,
+    dexno: '#' + String(s.dexID).padStart(3, '0'), types, stats: st, bst, abilities,
+    sprite: hd.sprites ? hd.sprites[id] : null, src: 'hack', prof, s };
 }
 function getSpecies(key, prof) {
-  return String(key)[0] === 'r' && (prof ?? state.profile) === 'rr' || String(key)[0] === 'r'
-    ? rrSpeciesRec(String(key).slice(1)) : offSpeciesRec(key);
+  key = String(key);
+  if (key[0] === '#') return hackSpeciesRec(key.slice(1), prof);
+  if (/^r\d+$/.test(key) && isHack(prof)) return hackSpeciesRec(key.slice(1), prof); // legacy team keys
+  return offSpeciesRec(key, prof);
 }
 function offAvailable(e, gen) {
   if (e.isCosmeticForme || !e.baseStats || !(e.num >= 1)) return false;
@@ -135,46 +232,60 @@ function offAvailable(e, gen) {
   else if (/Paldea/.test(f)) fg = 9;
   return e.num <= GEN_CAPS[gen] && fg <= gen;
 }
-const listCache = {};
+let listCache = {};
 function speciesList(prof) {
   prof = prof ?? state.profile;
   const ck = 's:' + prof;
   if (listCache[ck]) return listCache[ck];
   let out = [];
-  if (prof === 'rr') {
-    for (const id in D.rr.species) { const r = rrSpeciesRec(id); if (r) out.push(r); }
+  if (isHack(prof)) {
+    const hd = HD(prof);
+    if (hd) for (const id in hd.species) { const r = hackSpeciesRec(id, prof); if (r) out.push(r); }
     out.sort((a, b) => a.num - b.num || (a.s.order || 0) - (b.s.order || 0));
   } else {
     const gen = prof === 'nat' ? 0 : +prof;
-    for (const id in D.dex) { const e = D.dex[id]; if (offAvailable(e, gen)) out.push(offSpeciesRec(id)); }
+    for (const id in D.dex) { const e = D.dex[id]; if (offAvailable(e, gen)) out.push(offSpeciesRec(id, prof)); }
     out.sort((a, b) => a.num - b.num || (a.e.forme ? 1 : 0) - (b.e.forme ? 1 : 0) || a.name.localeCompare(b.name));
   }
   return (listCache[ck] = out);
 }
 
-function offMoveRec(id) {
-  const m = D.moves[id];
-  if (!m) return null;
-  return { key: id, name: m.name, type: m.type, cat: m.category, power: m.basePower || 0,
+function offMoveRec(id, prof) {
+  prof = prof ?? state.profile;
+  const base = D.moves[id];
+  if (!base) return null;
+  const ov = (modsFor(prof) || {}).moves;
+  const m = ov && ov[id] ? Object.assign({}, base, ov[id]) : base;
+  let cat = m.category;
+  if (profGen(prof) <= 3 && cat !== 'Status') cat = PHYS_TYPES.has(m.type) ? 'Physical' : 'Special';
+  return { key: id, name: m.name, type: m.type, cat, power: m.basePower || 0,
     acc: m.accuracy === true ? '—' : m.accuracy, pp: m.pp, priority: m.priority,
     desc: m.shortDesc || m.desc || '', longDesc: m.desc || m.shortDesc || '', src: 'off', m };
 }
-function rrMoveRec(id) {
+function hackMoveRec(id, prof) {
+  prof = prof ?? state.profile;
+  const hd = HD(prof);
   id = typeof id === 'object' ? id.ID : id;
-  const m = D.rr.moves[id];
+  const m = hd && hd.moves[id];
   if (!m || !m.name || m.ID === 0) return null;
-  return { key: 'r' + id, rrId: +id, name: m.name, type: (D.rr.types[m.type] || {}).name || '???',
-    cat: D.rr.splits[m.split] || '—', power: m.power || 0, acc: m.accuracy || '—', pp: m.pp,
-    priority: m.priority, desc: m.description || '', longDesc: m.description || '', src: 'rr', m };
+  return { key: '#' + id, hackId: +id, name: m.name, type: (hd.types[m.type] || {}).name || '???',
+    cat: (hd.splits || {})[m.split] || '—', power: m.power || 0, acc: m.accuracy || '—', pp: m.pp,
+    priority: m.priority, desc: m.description || '', longDesc: m.description || '', src: 'hack', m };
 }
-function getMove(key) { return String(key)[0] === 'r' && !D.moves[key] ? rrMoveRec(String(key).slice(1)) : offMoveRec(key); }
+function getMove(key, prof) {
+  key = String(key);
+  if (key[0] === '#') return hackMoveRec(key.slice(1), prof);
+  if (/^r\d+$/.test(key) && isHack(prof)) return hackMoveRec(key.slice(1), prof);
+  return offMoveRec(key, prof);
+}
 function movesList(prof) {
   prof = prof ?? state.profile;
   const ck = 'm:' + prof;
   if (listCache[ck]) return listCache[ck];
   let out = [];
-  if (prof === 'rr') {
-    for (const id in D.rr.moves) { const r = rrMoveRec(id); if (r) out.push(r); }
+  if (isHack(prof)) {
+    const hd = HD(prof);
+    if (hd) for (const id in hd.moves) { const r = hackMoveRec(id, prof); if (r) out.push(r); }
   } else {
     const gen = prof === 'nat' ? 9 : +prof;
     const nat = prof === 'nat';
@@ -186,7 +297,7 @@ function movesList(prof) {
         if (m.num > MOVE_CAPS[gen] || m.num < 1) continue;
         if (gen === 9 && m.isNonstandard === 'Past') continue;
       } else if (m.num < 1) continue;
-      out.push(offMoveRec(id));
+      out.push(offMoveRec(id, prof));
     }
   }
   out.sort((a, b) => a.name.localeCompare(b.name));
@@ -198,19 +309,25 @@ function offAbilityRec(id) {
   if (!a || a.num < 1) return null;
   return { key: id, name: a.name, desc: a.shortDesc || a.desc || '', longDesc: a.desc || a.shortDesc || '', rating: a.rating, src: 'off' };
 }
-function rrAbilityRec(id) {
-  const a = D.rr.abilities[id];
+function hackAbilityRec(id, prof) {
+  const hd = HD(prof);
+  const a = hd && hd.abilities[id];
   if (!a || !a.ID) return null;
-  return { key: 'r' + id, rrId: +id, name: a.names ? a.names[0] : a.name, desc: a.description || '', longDesc: a.description || '', src: 'rr' };
+  return { key: '#' + id, hackId: +id, name: a.names ? a.names[0] : a.name, desc: a.description || '', longDesc: a.description || '', src: 'hack' };
 }
-function getAbility(key) { return String(key)[0] === 'r' && !D.abilities[key] ? rrAbilityRec(String(key).slice(1)) : offAbilityRec(key); }
+function getAbility(key, prof) {
+  key = String(key);
+  return key[0] === '#' ? hackAbilityRec(key.slice(1), prof) : offAbilityRec(key);
+}
 function abilitiesList(prof) {
   prof = prof ?? state.profile;
   const ck = 'a:' + prof;
   if (listCache[ck]) return listCache[ck];
   const out = [];
-  if (prof === 'rr') { for (const id in D.rr.abilities) { const r = rrAbilityRec(id); if (r) out.push(r); } }
-  else { for (const id in D.abilities) { const r = offAbilityRec(id); if (r) out.push(r); } }
+  if (isHack(prof)) {
+    const hd = HD(prof);
+    if (hd) for (const id in hd.abilities) { const r = hackAbilityRec(id, prof); if (r) out.push(r); }
+  } else { for (const id in D.abilities) { const r = offAbilityRec(id); if (r) out.push(r); } }
   out.sort((a, b) => a.name.localeCompare(b.name));
   return (listCache[ck] = out);
 }
@@ -220,19 +337,25 @@ function offItemRec(id) {
   if (!it || it.isNonstandard === 'CAP' || it.isNonstandard === 'Custom') return null;
   return { key: id, name: it.name, desc: it.shortDesc || it.desc || '', longDesc: it.desc || it.shortDesc || '', gen: it.gen, src: 'off' };
 }
-function rrItemRec(id) {
-  const it = D.rr.items[id];
+function hackItemRec(id, prof) {
+  const hd = HD(prof);
+  const it = hd && hd.items[id];
   if (!it || !it.ID || !it.name || it.name === '????????') return null;
-  return { key: 'r' + id, rrId: +id, name: it.name, desc: it.description || '', longDesc: it.description || '', src: 'rr' };
+  return { key: '#' + id, hackId: +id, name: it.name, desc: it.description || '', longDesc: it.description || '', src: 'hack' };
 }
-function getItem(key) { return String(key)[0] === 'r' && !D.items[key] ? rrItemRec(String(key).slice(1)) : offItemRec(key); }
+function getItem(key, prof) {
+  key = String(key);
+  return key[0] === '#' ? hackItemRec(key.slice(1), prof) : offItemRec(key);
+}
 function itemsList(prof) {
   prof = prof ?? state.profile;
   const ck = 'i:' + prof;
   if (listCache[ck]) return listCache[ck];
   const out = [];
-  if (prof === 'rr') { for (const id in D.rr.items) { const r = rrItemRec(id); if (r) out.push(r); } }
-  else {
+  if (isHack(prof)) {
+    const hd = HD(prof);
+    if (hd) for (const id in hd.items) { const r = hackItemRec(id, prof); if (r) out.push(r); }
+  } else {
     const gen = profGen(prof);
     for (const id in D.items) { const r = offItemRec(id); if (r && (!r.gen || r.gen <= gen)) out.push(r); }
   }
@@ -256,7 +379,7 @@ function offLearnset(psid, prof) {
   const out = { level: [], machine: [], tutor: [], egg: [], other: [] };
   if (!ls) return out;
   for (const mid in ls) {
-    const mv = offMoveRec(mid);
+    const mv = offMoveRec(mid, prof);
     if (!mv) continue;
     let codes = ls[mid];
     if (nat) { const mx = Math.max(...codes.map((c) => +c[0])); codes = codes.filter((c) => +c[0] === mx); }
@@ -281,19 +404,20 @@ function offLearnset(psid, prof) {
   for (const k of ['machine', 'tutor', 'egg', 'other']) out[k].sort((a, b) => a.name.localeCompare(b.name));
   return out;
 }
-function rrLearnset(rrId) {
-  const s = D.rr.species[rrId];
+function hackLearnset(hackId, prof) {
+  const hd = HD(prof);
+  const s = hd && hd.species[hackId];
   const out = { level: [], machine: [], tutor: [], egg: [], other: [] };
   if (!s) return out;
-  for (const [mid, lvl] of s.levelupMoves || []) { const mv = rrMoveRec(mid); if (mv) out.level.push({ lvl, mv }); }
+  for (const [mid, lvl] of s.levelupMoves || []) { const mv = hackMoveRec(mid, prof); if (mv) out.level.push({ lvl, mv }); }
   out.level.sort((a, b) => a.lvl - b.lvl);
-  for (const tm of s.tmMoves || []) { const mv = rrMoveRec(D.rr.tmMoves[tm]); if (mv) out.machine.push(mv); }
-  for (const t of s.tutorMoves || []) { const mv = rrMoveRec(D.rr.tutorMoves[t]); if (mv) out.tutor.push(mv); }
-  for (const mid of s.eggMoves || []) { const mv = rrMoveRec(mid); if (mv) out.egg.push(mv); }
+  for (const tm of s.tmMoves || []) { const mv = hackMoveRec(hd.tmMoves[tm], prof); if (mv) out.machine.push(mv); }
+  for (const t of s.tutorMoves || []) { const mv = hackMoveRec(hd.tutorMoves[t], prof); if (mv) out.tutor.push(mv); }
+  for (const mid of s.eggMoves || []) { const mv = hackMoveRec(mid, prof); if (mv) out.egg.push(mv); }
   for (const k of ['machine', 'tutor', 'egg']) out[k].sort((a, b) => a.name.localeCompare(b.name));
   return out;
 }
-function getLearnset(rec, prof) { return rec.src === 'rr' ? rrLearnset(rec.rrId) : offLearnset(rec.psid, prof); }
+function getLearnset(rec, prof) { return rec.src === 'hack' ? hackLearnset(rec.hackId, rec.prof ?? prof) : offLearnset(rec.psid, prof); }
 function legalMoves(rec, prof) {
   const ls = getLearnset(rec, prof);
   const seen = new Map();
@@ -301,19 +425,17 @@ function legalMoves(rec, prof) {
   for (const k of ['machine', 'tutor', 'egg', 'other']) for (const mv of ls[k]) seen.set(mv.key, mv);
   return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
-
 function learnedBy(moveRec, prof) {
   prof = prof ?? state.profile;
   const out = [];
-  if (moveRec.src === 'rr') {
-    const mid = moveRec.rrId;
-    const tmNos = Object.keys(D.rr.tmMoves).filter((k) => {
-      const v = D.rr.tmMoves[k]; return (typeof v === 'object' ? v.ID : v) === mid;
-    }).map(Number);
-    const tutNos = Object.keys(D.rr.tutorMoves).filter((k) => {
-      const v = D.rr.tutorMoves[k]; return (typeof v === 'object' ? v.ID : v) === mid;
-    }).map(Number);
-    for (const rec of speciesList('rr')) {
+  if (moveRec.src === 'hack') {
+    const hd = HD(prof);
+    if (!hd) return out;
+    const mid = moveRec.hackId;
+    const idOf = (v) => (typeof v === 'object' ? v.ID : v);
+    const tmNos = Object.keys(hd.tmMoves || {}).filter((k) => idOf(hd.tmMoves[k]) === mid).map(Number);
+    const tutNos = Object.keys(hd.tutorMoves || {}).filter((k) => idOf(hd.tutorMoves[k]) === mid).map(Number);
+    for (const rec of speciesList(prof)) {
       const s = rec.s;
       if ((s.levelupMoves || []).some((x) => x[0] === mid) ||
           (s.eggMoves || []).includes(mid) ||
@@ -334,27 +456,60 @@ function withAbility(abRec, prof) {
 }
 
 // ---------- type matchups ----------
-function defenseProfile(rec) {
+function defenseProfile(rec, prof) {
+  prof = rec.prof ?? prof ?? state.profile;
   const out = {};
-  if (rec.src === 'rr') {
+  if (rec.src === 'hack') {
+    const hd = HD(prof);
     const defIdx = rec.s.type.map(Number);
-    for (const aid in D.rr.types) {
-      const t = D.rr.types[aid];
+    for (const aid in hd.types) {
+      const t = hd.types[aid];
+      if (!t.name || !t.matchup) continue;
       let mult = 1;
       for (const d of new Set(defIdx)) mult *= RR_MULT[t.matchup[d]] ?? 1;
       out[t.name] = mult;
     }
   } else {
-    for (const atk of TYPES) {
+    const chartOv = (modsFor(prof) || {}).typechart;
+    for (const atk of typesFor(prof)) {
       let mult = 1;
       for (const def of rec.types) {
-        const row = D.typechart[toID(def)];
-        if (row) mult *= OFF_MULT[row.damageTaken[atk]] ?? 1;
+        const tid = toID(def);
+        let taken = (D.typechart[tid] || {}).damageTaken || {};
+        if (chartOv && chartOv[tid] && chartOv[tid].damageTaken) taken = Object.assign({}, taken, chartOv[tid].damageTaken);
+        mult *= OFF_MULT[taken[atk]] ?? 1;
       }
       out[atk] = mult;
     }
   }
   return out;
+}
+
+// ---------- flavor / game-specific info ----------
+function flavorFor(rec, prof) {
+  const num = rec.src === 'off' ? rec.num : (rec.psid && D.dex[rec.psid] ? D.dex[rec.psid].num : null);
+  const f = num != null && D.flavor[num];
+  if (!f) return null;
+  const g = profGen(prof);
+  let text = null, fromGen = null;
+  for (let x = g; x >= 1 && !text; x--) if (f.t[x]) { text = f.t[x]; fromGen = x; }
+  if (!text) for (let x = g + 1; x <= 9; x++) if (f.t[x]) { text = f.t[x]; fromGen = x; break; }
+  return text ? { genus: f.g, text, fromGen } : (f.g ? { genus: f.g, text: null, fromGen: null } : null);
+}
+function hackChanges(rec) {
+  if (!rec.psid) return null;
+  const off = offSpeciesRec(rec.psid, 'nat');
+  if (!off) return null;
+  const diffs = [];
+  for (const k of STAT_KEYS) if (off.stats[k] !== rec.stats[k]) {
+    const d = rec.stats[k] - off.stats[k];
+    diffs.push(STAT_NAMES[k] + ' ' + off.stats[k] + ' → ' + rec.stats[k] + ' (' + (d > 0 ? '+' : '') + d + ')');
+  }
+  if (off.types.join() !== rec.types.join()) diffs.push('Type ' + off.types.join('/') + ' → ' + rec.types.join('/'));
+  const oa = off.abilities.map((a) => a.name).sort().join(', ');
+  const ra = rec.abilities.map((a) => a.name).sort().join(', ');
+  if (oa !== ra) diffs.push('Abilities: ' + (ra || '—') + ' (was ' + (oa || '—') + ')');
+  return diffs.length ? diffs : null;
 }
 
 // ---------- evolutions ----------
@@ -371,27 +526,18 @@ function offEvoText(e) {
     default: return e.evoLevel ? 'Level ' + e.evoLevel : (e.evoCondition || 'Special');
   }
 }
-function rrEvoText(evo) {
-  const tpl = D.rr.evolutions[evo[0]];
-  if (!tpl) return 'Special';
-  try {
-    // Templates ship as backtick strings inside RRDex's own data file (baked in
-    // at build time, never user input), e.g. "`at Level ${evo[1]}`".
-    const fn = new Function('evo', 'items', 'species', 'moves', 'types', 'return ' + tpl);
-    return fn(evo, D.rr.items, D.rr.species, D.rr.moves, D.rr.types).replace(/^at |^on |^with /, (m) => m);
-  } catch { return 'Special'; }
-}
-function evoChain(rec) {
-  // returns {root, kids(key)->[{rec, cond}]}
-  if (rec.src === 'rr') {
-    let rootId = rec.s.ancestor || rec.rrId;
-    if (!D.rr.species[rootId]) rootId = rec.rrId;
+function evoChain(rec, prof) {
+  if (rec.src === 'hack') {
+    const p = rec.prof;
+    let rootId = rec.s.ancestor || rec.hackId;
+    const hd = HD(p);
+    if (!hd.species[rootId]) rootId = rec.hackId;
     return {
-      root: rrSpeciesRec(rootId),
+      root: hackSpeciesRec(rootId, p),
       kids(r) {
-        return (r.s.evolutions || []).map((evo) => {
-          const target = rrSpeciesRec(evo[2]);
-          return target ? { rec: target, cond: rrEvoText(evo) } : null;
+        return (r.s.evolutions || []).map((evo, i) => {
+          const target = hackSpeciesRec(evo[2], p);
+          return target ? { rec: target, cond: (r.s.evoTexts || [])[i] || 'Special' } : null;
         }).filter(Boolean);
       },
     };
@@ -399,44 +545,63 @@ function evoChain(rec) {
   let e = rec.e, guard = 0;
   while (e.prevo && guard++ < 6) { const p = D.dex[toID(e.prevo)]; if (!p) break; e = p; }
   return {
-    root: offSpeciesRec(toID(e.name)),
+    root: offSpeciesRec(toID(e.name), prof),
     kids(r) {
       return (r.e.evos || []).map((nm) => {
-        const t = offSpeciesRec(toID(nm));
+        const t = offSpeciesRec(toID(nm), prof);
         return t ? { rec: t, cond: offEvoText(t.e) } : null;
       }).filter(Boolean);
     },
   };
 }
 
-// ---------- RR encounters ----------
-let rrEncIndex = null;
-function rrEncounters(rrId) {
-  if (!rrEncIndex) {
-    rrEncIndex = {};
-    for (const area of D.rr.areas || []) {
+// ---------- hack encounters ----------
+const encCache = {};
+function hackEncounters(hackId, prof) {
+  prof = prof ?? state.profile;
+  if (!encCache[prof]) {
+    const idx = {};
+    const hd = HD(prof);
+    for (const area of (hd && hd.areas) || []) {
       for (const k in area) {
         if (!k.startsWith('wild-')) continue;
         const method = k.slice(5).replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase());
         for (const slot in area[k]) {
           for (const ent of area[k][slot]) {
             const [sid, lo, hi] = ent;
-            (rrEncIndex[sid] = rrEncIndex[sid] || []).push({ area: area.name, method, lo, hi });
+            (idx[sid] = idx[sid] || []).push({ area: area.name, method, lo, hi });
           }
         }
       }
     }
-    for (const sid in rrEncIndex) {
+    for (const sid in idx) {
       const merged = {};
-      for (const x of rrEncIndex[sid]) {
+      for (const x of idx[sid]) {
         const key = x.area + '|' + x.method;
         if (!merged[key]) merged[key] = x;
         else { merged[key].lo = Math.min(merged[key].lo, x.lo); merged[key].hi = Math.max(merged[key].hi, x.hi); }
       }
-      rrEncIndex[sid] = Object.values(merged);
+      idx[sid] = Object.values(merged);
     }
+    encCache[prof] = idx;
   }
-  return rrEncIndex[rrId] || [];
+  return encCache[prof][hackId] || [];
+}
+
+// ---------- trainers ----------
+function trainersFor(prof) {
+  prof = prof ?? state.profile;
+  const hd = HD(prof);
+  if (!hd || !hd.trainers) return [];
+  const ck = 't:' + prof;
+  if (listCache[ck]) return listCache[ck];
+  const out = Object.values(hd.trainers).filter((t) => t && t.name)
+    .map((t) => {
+      const modes = ['normal', 'hardcore'].filter((m) => Array.isArray(t[m]) && t[m].length);
+      return modes.length ? { t, modes } : null;
+    }).filter(Boolean);
+  out.sort((a, b) => (a.t.ID || 0) - (b.t.ID || 0));
+  return (listCache[ck] = out);
 }
 
 // ============================== teams ====================================
@@ -446,6 +611,16 @@ function newTeam() {
   teams.push({ name: 'New Team', profile: state.profile, mons: [null, null, null, null, null, null] });
   saveTeams();
   return teams.length - 1;
+}
+const EV_ORDER = ['hp', 'atk', 'def', 'spa', 'spd', 'spe'];
+function calcStat(k, base, iv, ev, lvl, nature) {
+  iv = iv ?? 31; ev = ev ?? 0;
+  const core = Math.floor((2 * base + iv + Math.floor(ev / 4)) * lvl / 100);
+  if (k === 'hp') return base === 1 ? 1 : core + lvl + 10;
+  let v = core + 5;
+  const fx = natureFx(nature);
+  if (fx) { if (fx.plus === k) v = Math.floor(v * 1.1); else if (fx.minus === k) v = Math.floor(v * 0.9); }
+  return v;
 }
 function exportShowdown(team) {
   const lines = [];
@@ -457,11 +632,16 @@ function exportShowdown(team) {
     if (mon.item) head += ' @ ' + mon.item;
     lines.push(head);
     if (mon.ability) lines.push('Ability: ' + mon.ability);
+    if (mon.shiny) lines.push('Shiny: Yes');
     if (mon.level && mon.level !== 100) lines.push('Level: ' + mon.level);
+    const evs = EV_ORDER.filter((k) => mon.evs && mon.evs[k] > 0).map((k) => mon.evs[k] + ' ' + STAT_NAMES[k]);
+    if (evs.length) lines.push('EVs: ' + evs.join(' / '));
     if (mon.nature) lines.push(mon.nature + ' Nature');
+    const ivs = EV_ORDER.filter((k) => mon.ivs && mon.ivs[k] != null && mon.ivs[k] !== 31).map((k) => mon.ivs[k] + ' ' + STAT_NAMES[k]);
+    if (ivs.length) lines.push('IVs: ' + ivs.join(' / '));
     for (const mk of mon.moves) {
       if (!mk) continue;
-      const mv = getMove(mk);
+      const mv = getMove(mk, team.profile);
       if (mv) lines.push('- ' + mv.name);
     }
     lines.push('');
@@ -502,17 +682,52 @@ function iconIndexFor(rec) {
   return rec.src === 'off' && rec.num > 0 ? rec.num : 0;
 }
 function iconEl(rec, scale) {
+  if (rec.sprite && !rec.psid) { // fakemon from an imported hack: use its own sprite
+    const img = el('img', { class: 'picon', src: rec.sprite, alt: '', style: 'object-fit:contain' });
+    if (scale) img.style.transform = `scale(${scale})`;
+    return img;
+  }
   const idx = iconIndexFor(rec);
   const d = el('div', { class: 'picon' });
   d.style.backgroundPosition = `-${(idx % 12) * 40}px -${Math.floor(idx / 12) * 30}px`;
   if (scale) d.style.transform = `scale(${scale})`;
   return d;
 }
+function spriteUrls(rec, shiny) {
+  const urls = [];
+  if (rec.sprite && !shiny) urls.push(rec.sprite);
+  const psid = rec.psid;
+  if (psid) {
+    const e = D.dex[psid];
+    if (e && !e.forme && e.num > 0) {
+      // Pokémon HOME official 3D renders (base forms; PokeAPI hosts by dex number)
+      urls.push('https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/home/' + (shiny ? 'shiny/' : '') + e.num + '.png');
+    }
+    // Showdown animated 3D model sprites (cover alternate formes + shiny)
+    urls.push('https://play.pokemonshowdown.com/sprites/' + (shiny ? 'ani-shiny' : 'ani') + '/' + psid + '.gif');
+    urls.push('https://play.pokemonshowdown.com/sprites/' + (shiny ? 'gen5-shiny' : 'gen5') + '/' + psid + '.png');
+  }
+  if (rec.sprite && shiny) urls.push(rec.sprite);
+  return urls;
+}
+function spriteEl(rec, shiny) {
+  const holder = el('div', { class: 'art' });
+  const urls = spriteUrls(rec, shiny);
+  (function tryAt(i) {
+    if (i >= urls.length) { holder.textContent = ''; holder.append(iconEl(rec, 2)); return; }
+    const img = el('img', { alt: rec.name });
+    img.onerror = () => tryAt(i + 1);
+    img.src = urls[i];
+    holder.textContent = '';
+    holder.append(img);
+  })(0);
+  return holder;
+}
 function typeBadge(t) { return el('span', { class: 'type', style: 'background:' + (TYPE_COLORS[t] || '#68A090') }, t); }
 function typeRow(types) { return el('div', { class: 'types' }, types.map(typeBadge)); }
 function chunkList(container, items, renderItem, chunk = 80) {
   let i = 0;
-  const sentinel = el('div', { style: 'height:1px' });
+  const sentinel = el('div', { style: 'height:1px;grid-column:1/-1' });
   container.append(sentinel);
   const obs = new IntersectionObserver((es) => { if (es.some((x) => x.isIntersecting)) more(); }, { rootMargin: '800px' });
   function more() {
@@ -530,13 +745,14 @@ function chunkList(container, items, renderItem, chunk = 80) {
 const sheetStack = [];
 function openSheet(title, build) {
   const body = el('main');
-  const sheet = el('div', { class: 'sheet' },
+  const panel = el('div', { class: 'panel' },
     el('header', {},
       el('div', { class: 'hrow' },
         el('div', { class: 'htitle' },
           el('button', { class: 'back', onclick: () => closeSheet(sheet) }, '‹ Back'),
           el('span', {}, title)))),
     body);
+  const sheet = el('div', { class: 'sheet', onclick: (ev) => { if (ev.target === sheet) closeSheet(sheet); } }, panel);
   document.body.append(sheet);
   sheetStack.push(sheet);
   build(body, sheet);
@@ -548,9 +764,7 @@ function closeSheet(sheet) {
   sheet.remove();
 }
 function closeAllSheets() { while (sheetStack.length) sheetStack.pop().remove(); }
-
 function pickerSheet(title, items, onPick, extras) {
-  // items: [{label, sub, rec?, value}]
   openSheet(title, (body, sheet) => {
     const list = el('div', { class: 'list' });
     const search = el('input', { type: 'search', placeholder: 'Search…', autocomplete: 'off',
@@ -578,26 +792,105 @@ function pickerSheet(title, items, onPick, extras) {
 // ============================== views ====================================
 function render() {
   closeAllSheets();
+  if (state.tab === 'trainers' && !trainersFor().length) state.tab = 'dex';
   app.textContent = '';
-  ({ dex: viewDex, moves: viewMoves, abil: viewAbilities, items: viewItems, teams: viewTeams }[state.tab] || viewDex)();
+  ({ dex: viewDex, moves: viewMoves, abil: viewAbilities, items: viewItems, teams: viewTeams, trainers: viewTrainers }[state.tab] || viewDex)();
   app.append(buildNav());
 }
 function buildNav() {
   const tabs = [
     ['dex', '◓', 'Pokédex'], ['moves', '⚡', 'Moves'], ['abil', '✨', 'Abilities'],
-    ['items', '🎒', 'Items'], ['teams', '⚔️', 'Teams'],
+    ['items', '🎒', 'Items'],
   ];
+  if (trainersFor().length) tabs.push(['trainers', '🥊', 'Trainers']);
+  tabs.push(['teams', '⚔️', 'Teams']);
   return el('nav', {}, tabs.map(([id, ic, label]) =>
     el('button', { class: state.tab === id ? 'on' : '', onclick: () => { state.tab = id; render(); } },
       el('span', { class: 'ni' }, ic), label)));
 }
+
+// ---------- profile selector + rom-hack importer ----------
+const importInput = el('input', { type: 'file', accept: '.js,.json,.txt', style: 'display:none',
+  onchange: () => { const f = importInput.files[0]; if (f) importHackFile(f); importInput.value = ''; } });
+document.body.append(importInput);
+async function importHackFile(file) {
+  let text;
+  try { text = await file.text(); } catch { alert('Could not read the file.'); return; }
+  let data = null;
+  try { data = JSON.parse(text); } catch {}
+  if (!data) {
+    // RRDex-style data.js is a JS object literal, not JSON. This runs the
+    // user's own chosen file on their own device (same trust as opening it).
+    try { data = new Function('return (' + text + ')')(); }
+    catch (e) {
+      alert('Could not parse this file. If you are using the hosted app, note it cannot parse .js dex files — convert the file to JSON, or use the local UltimateDex.html.');
+      return;
+    }
+  }
+  if (!data || !data.species || !data.moves || !data.types || !data.abilities) {
+    alert('This does not look like an RRDex-format dex file (needs species, moves, types, abilities).');
+    return;
+  }
+  for (const sid in data.species) { // pre-render evolution texts (same trick as the build)
+    const s = data.species[sid];
+    if (!s.evolutions || s.evoTexts) continue;
+    s.evoTexts = s.evolutions.map((evo) => {
+      const tpl = (data.evolutions || {})[evo[0]];
+      if (!tpl) return 'Special';
+      try { return new Function('evo', 'items', 'species', 'moves', 'types', 'return ' + tpl)(evo, data.items, data.species, data.moves, data.types); }
+      catch { return 'Special'; }
+    });
+  }
+  const name = (prompt('Name this dex profile:', file.name.replace(/\.(js|json|txt)$/i, '')) || 'Imported Hack').slice(0, 40);
+  const id = 'h:' + Date.now().toString(36);
+  const rec = { id, name, data };
+  customs[id] = rec;
+  try { await idbPut(rec); } catch (e) { alert('Saved for this session only (storage unavailable: ' + e + ')'); }
+  listCache = {};
+  state.profile = id;
+  store.set('profile', id);
+  render();
+}
+function manageProfilesSheet() {
+  openSheet('Imported Dexes', (body) => {
+    const page = el('div', { class: 'page' });
+    const list = Object.values(customs);
+    if (!list.length) page.append(el('div', { class: 'empty' }, 'No imported dex profiles. Use “Import rom-hack dex” in the profile menu — it accepts a data.js/JSON file in RRDex format (used by the dex sites of many hacks: Radical Red, Unbound, R.O.W.E., …).'));
+    for (const p of list) {
+      page.append(el('div', { class: 'card' },
+        el('div', { class: 'kv' },
+          el('span', {}, p.name),
+          el('button', { class: 'back', style: 'color:var(--bad)', onclick: async () => {
+            if (!confirm('Remove "' + p.name + '"?')) return;
+            delete customs[p.id];
+            try { await idbDel(p.id); } catch {}
+            if (state.profile === p.id) { state.profile = 'nat'; store.set('profile', 'nat'); }
+            listCache = {};
+            closeAllSheets(); render();
+          } }, 'Remove'))));
+    }
+    body.append(page);
+  });
+}
 function profileSelect() {
   const sel = el('select', { class: 'profile-pill', onchange: () => {
-    state.profile = sel.value;
-    store.set('profile', state.profile);
+    const v = sel.value;
+    if (v === '__import') { sel.value = state.profile; importInput.click(); return; }
+    if (v === '__manage') { sel.value = state.profile; manageProfilesSheet(); return; }
+    state.profile = v;
+    store.set('profile', v);
     state.f.dex.types = []; state.f.moves.types = []; state.f.moves.cat = null;
     render();
-  } }, PROFILES.map((p) => el('option', { value: p.id }, p.label)));
+  } });
+  const groups = {};
+  for (const p of profiles()) {
+    if (!groups[p.group]) sel.append(groups[p.group] = el('optgroup', { label: p.group }));
+    groups[p.group].append(el('option', { value: p.id }, p.label));
+  }
+  const acts = el('optgroup', { label: 'Custom' });
+  acts.append(el('option', { value: '__import' }, '＋ Import rom-hack dex…'));
+  if (Object.keys(customs).length) acts.append(el('option', { value: '__manage' }, '⚙ Manage imported dexes'));
+  sel.append(acts);
   sel.value = state.profile;
   return sel;
 }
@@ -623,18 +916,15 @@ function viewDex() {
     sortSel.value = f.sort;
     const dirBtn = el('button', { class: 'chip', onclick: () => { f.dir = -f.dir; dirBtn.textContent = f.dir === 1 ? '↑' : '↓'; refreshers.list(); } }, f.dir === 1 ? '↑' : '↓');
     return el('div', { class: 'chiprow' }, sortSel, dirBtn,
-      TYPES.map((t) => {
-        const b = el('button', {
-          class: 'chip' + (f.types.includes(t) ? ' on' : ''),
-          style: f.types.includes(t) ? 'background:' + TYPE_COLORS[t] : '',
-          onclick: () => {
-            const i = f.types.indexOf(t);
-            if (i >= 0) f.types.splice(i, 1); else { f.types.push(t); if (f.types.length > 2) f.types.shift(); }
-            render();
-          },
-        }, t);
-        return b;
-      }));
+      typesFor().map((t) => el('button', {
+        class: 'chip' + (f.types.includes(t) ? ' on' : ''),
+        style: f.types.includes(t) ? 'background:' + (TYPE_COLORS[t] || '#68A090') : '',
+        onclick: () => {
+          const i = f.types.indexOf(t);
+          if (i >= 0) f.types.splice(i, 1); else { f.types.push(t); if (f.types.length > 2) f.types.shift(); }
+          render();
+        },
+      }, t)));
   }
   const list = el('div', { class: 'list' });
   const count = el('div', { class: 'count' });
@@ -665,78 +955,92 @@ function speciesRow(rec) {
     el('div', { class: 'end' }, typeRow(rec.types), el('span', { class: 'stat' }, 'BST ' + rec.bst)));
 }
 
-function spriteEl(rec) {
-  const holder = el('div', { class: 'art' });
-  if (rec.psid) {
-    const img = el('img', { alt: rec.name, loading: 'lazy' });
-    img.onerror = () => { img.remove(); holder.append(iconEl(rec, 2)); };
-    img.src = 'https://play.pokemonshowdown.com/sprites/gen5/' + rec.psid + '.png';
-    holder.append(img);
-  } else holder.append(iconEl(rec, 2));
-  return holder;
-}
 function openSpecies(rec) {
   openSheet(rec.name, (body) => {
-    const prof = state.profile;
-    // hero
+    const prof = rec.prof ?? state.profile;
+    const gen = profGen(prof);
+    const flavor = flavorFor(rec, prof);
+    let shiny = false;
+    let art = spriteEl(rec, shiny);
+
     const meta = [];
+    if (flavor && flavor.genus) meta.push(flavor.genus);
     if (rec.src === 'off') {
       if (rec.e.heightm) meta.push(rec.e.heightm + ' m');
       if (rec.e.weightkg) meta.push(rec.e.weightkg + ' kg');
       if (rec.e.forme) meta.push(rec.e.forme + ' Forme');
     }
-    body.append(el('div', { class: 'page' },
-      el('div', { class: 'hero' }, spriteEl(rec),
-        el('div', {},
-          el('div', { class: 'dexno' }, rec.dexno + (rec.src === 'rr' ? ' · Radical Red' : '')),
-          el('h2', {}, rec.name),
-          el('div', { style: 'margin-top:6px' }, typeRow(rec.types)),
-          meta.length ? el('div', { class: 'meta' }, meta.join(' · ')) : null))));
-    const page = body.firstChild;
+    const shinyBtn = el('button', { class: 'chip shinybtn', onclick: () => {
+      shiny = !shiny;
+      shinyBtn.classList.toggle('on', shiny);
+      const next = spriteEl(rec, shiny);
+      art.replaceWith(next); art = next;
+    } }, '✨ Shiny');
+    const hero = el('div', { class: 'hero' }, art,
+      el('div', { style: 'flex:1' },
+        el('div', { class: 'dexno' }, rec.dexno + ' · ' + profLabel(prof)),
+        el('h2', {}, rec.name),
+        el('div', { style: 'margin-top:6px' }, typeRow(rec.types)),
+        meta.length ? el('div', { class: 'meta' }, meta.join(' · ')) : null,
+        el('div', { style: 'margin-top:8px' }, shinyBtn)));
+    const page = el('div', { class: 'page' }, hero);
+    body.append(page);
 
-    // stats
-    page.append(el('div', { class: 'card' }, el('h3', {}, 'Base Stats'),
-      STAT_KEYS.map((k) => {
+    if (flavor && flavor.text) {
+      page.append(el('div', { class: 'card' },
+        el('h3', {}, 'Dex Entry' + (flavor.fromGen ? ' · Gen ' + flavor.fromGen + ' games' : '')),
+        el('div', { class: 'flavor' }, flavor.text)));
+    }
+
+    // stats (gen 1 had a unified Special stat)
+    const statRows = gen === 1 && rec.src === 'off'
+      ? [['hp', 'HP'], ['atk', 'Atk'], ['def', 'Def'], ['spa', 'Spc'], ['spe', 'Spe']]
+      : STAT_KEYS.map((k) => [k, STAT_NAMES[k]]);
+    page.append(el('div', { class: 'card' }, el('h3', {}, 'Base Stats · ' + profLabel(prof)),
+      statRows.map(([k, label]) => {
         const v = rec.stats[k];
         const hue = Math.round(Math.min(v, 150) / 150 * 120);
         return el('div', { class: 'statrow' },
-          el('span', { class: 'sn' }, STAT_NAMES[k]),
+          el('span', { class: 'sn' }, label),
           el('span', { class: 'sv' }, v),
           el('div', { class: 'sbar' }, el('i', { style: `width:${Math.min(100, v / 2)}%;background:hsl(${hue} 70% 48%)` })));
       }),
       el('div', { class: 'bst' }, 'Total: ' + rec.bst)));
 
-    // abilities
+    // what this game/hack changed vs. current official data
+    if (rec.src === 'hack') {
+      const diffs = hackChanges(rec);
+      if (diffs) page.append(el('div', { class: 'card' }, el('h3', {}, 'Changed in ' + profLabel(prof)),
+        diffs.map((d) => el('div', { class: 'kv' }, el('span', {}, d)))));
+    }
+
     if (rec.abilities.length) {
       page.append(el('div', { class: 'card' }, el('h3', {}, 'Abilities'),
         rec.abilities.map((a) => el('button', { class: 'abil', style: 'display:block;width:100%;text-align:left', onclick: () => {
-          const key = a.rrId ? 'r' + a.rrId : abilityByName[a.name];
-          const ab = key != null ? getAbility(String(key)) : null;
+          const key = a.hackId ? '#' + a.hackId : abilityByName[a.name];
+          const ab = key != null ? getAbility(String(key), prof) : null;
           if (ab) openAbility(ab);
         } },
           el('div', { class: 'an' }, a.name, a.hidden ? el('span', { class: 'tag' }, 'Hidden') : null),
           a.desc ? el('div', { class: 'ad' }, a.desc) : null))));
     }
 
-    // held items (RR)
-    if (rec.src === 'rr') {
-      const held = (rec.s.items || []).filter(Boolean).map((i) => rrItemRec(i)).filter(Boolean);
+    if (rec.src === 'hack') {
+      const held = (rec.s.items || []).filter(Boolean).map((i) => hackItemRec(i, prof)).filter(Boolean);
       if (held.length) page.append(el('div', { class: 'card' }, el('h3', {}, 'Wild Held Items'),
         held.map((it) => el('div', { class: 'kv' }, el('span', { class: 'k' }, it.name), el('span', {}, '')))));
     }
 
-    // defenses
-    const def = defenseProfile(rec);
+    const def = defenseProfile(rec, prof);
     const groups = [[4, '4×'], [2, '2×'], [0.5, '½×'], [0.25, '¼×'], [0, '0×']];
     const defRows = groups.map(([m, label]) => {
       const ts = Object.keys(def).filter((t) => def[t] === m);
       return ts.length ? el('div', { class: 'defrow' }, el('span', { class: 'mult' }, label), typeRow(ts)) : null;
     }).filter(Boolean);
-    page.append(el('div', { class: 'card' }, el('h3', {}, 'Defenses'),
+    page.append(el('div', { class: 'card' }, el('h3', {}, 'Defenses · ' + profLabel(prof)),
       defRows.length ? defRows : el('div', { class: 'muted' }, 'No weaknesses or resistances.')));
 
-    // evolutions
-    const chain = evoChain(rec);
+    const chain = evoChain(rec, prof);
     if (chain.root) {
       const seen = new Set();
       const evoWrap = el('div', { class: 'evo' });
@@ -755,16 +1059,14 @@ function openSpecies(rec) {
       if (seen.size > 1) page.append(el('div', { class: 'card' }, el('h3', {}, 'Evolution'), evoWrap));
     }
 
-    // encounters (RR)
-    if (rec.src === 'rr') {
-      const enc = rrEncounters(rec.rrId);
-      if (enc.length) page.append(el('div', { class: 'card' }, el('h3', {}, 'Locations (Radical Red)'),
+    if (rec.src === 'hack') {
+      const enc = hackEncounters(rec.hackId, prof);
+      if (enc.length) page.append(el('div', { class: 'card' }, el('h3', {}, 'Locations · ' + profLabel(prof)),
         enc.map((x) => el('div', { class: 'kv' },
           el('span', { class: 'k' }, x.area),
           el('span', {}, x.method + ' · Lv ' + (x.lo === x.hi ? x.lo : x.lo + '–' + x.hi))))));
     }
 
-    // learnset
     const ls = getLearnset(rec, prof);
     const segs = [['level', 'Level Up'], ['machine', 'TM/HM'], ['tutor', 'Tutor'], ['egg', 'Egg']];
     let cur = 'level';
@@ -787,7 +1089,7 @@ function openSpecies(rec) {
     function drawLs() {
       lsList.textContent = '';
       const rows = cur === 'level' ? ls.level.map((x) => moveRow(x.mv, x.lvl)) : ls[cur].map((mv) => moveRow(mv));
-      if (!rows.length) lsList.append(el('div', { class: 'empty' }, 'No moves in this category' + (rec.src === 'off' ? ' for ' + profLabel(prof) : '') + '.'));
+      if (!rows.length) lsList.append(el('div', { class: 'empty' }, 'No moves in this category for ' + profLabel(prof) + '.'));
       else rows.forEach((r) => lsList.append(r));
     }
     drawLs();
@@ -807,9 +1109,9 @@ function viewMoves() {
       ['Physical', 'Special', 'Status'].map((c) =>
         el('button', { class: 'chip' + (f.cat === c ? ' on' : ''), style: f.cat === c ? 'background:var(--accent2)' : '',
           onclick: () => { f.cat = f.cat === c ? null : c; render(); } }, c)),
-      TYPES.map((t) => el('button', {
+      typesFor().map((t) => el('button', {
         class: 'chip' + (f.types.includes(t) ? ' on' : ''),
-        style: f.types.includes(t) ? 'background:' + TYPE_COLORS[t] : '',
+        style: f.types.includes(t) ? 'background:' + (TYPE_COLORS[t] || '#68A090') : '',
         onclick: () => { f.types = f.types.includes(t) ? [] : [t]; render(); },
       }, t)));
   }
@@ -847,7 +1149,7 @@ function openMove(mv) {
         el('div', {},
           el('h2', {}, mv.name),
           el('div', { style: 'margin-top:6px;display:flex;gap:6px;align-items:center' },
-            typeBadge(mv.type), el('span', { class: 'stat' }, mv.cat)))),
+            typeBadge(mv.type), el('span', { class: 'stat' }, mv.cat + ' · ' + profLabel())))),
       el('div', { class: 'card' }, el('h3', {}, 'Battle Stats'),
         el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Power'), el('span', {}, mv.power || '—')),
         el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Accuracy'), el('span', {}, mv.acc === true ? '—' : mv.acc)),
@@ -920,6 +1222,87 @@ function openItem(it) {
   });
 }
 
+// ---------- Trainers tab ----------
+function viewTrainers() {
+  const f = state.f.trainers;
+  const list = el('div', { class: 'list' });
+  const count = el('div', { class: 'count' });
+  refreshers.list = () => {
+    list.textContent = '';
+    let items = trainersFor();
+    const q = toID(f.q);
+    if (q) items = items.filter((x) => toID(x.t.name).includes(q) || toID(x.t.areaName || '').includes(q));
+    count.textContent = items.length + ' trainers · ' + profLabel();
+    chunkList(list, items, ({ t, modes }) =>
+      el('button', { class: 'row', onclick: () => openTrainer(t, modes) },
+        el('div', { class: 'body' },
+          el('div', { class: 'name' }, t.name),
+          el('div', { class: 'sub' }, [t.areaName, modes.map((m) => m + ' ' + t[m].length).join(' · ')].filter(Boolean).join(' — ')))));
+  };
+  app.append(listHeader('Trainers', 'trainers'), el('main', {}, count, list));
+  refreshers.list();
+}
+function openTrainer(t, modes) {
+  const prof = state.profile;
+  const hd = HD(prof);
+  openSheet(t.name, (body) => {
+    const page = el('div', { class: 'page' });
+    body.append(page);
+    let mode = modes[0];
+    const partyWrap = el('div', { class: 'page' });
+    const segBar = modes.length > 1
+      ? el('div', { class: 'seg' }, modes.map((m) => {
+          const b = el('button', { class: m === mode ? 'on' : '', onclick: () => {
+            mode = m;
+            for (const c of segBar.children) c.classList.toggle('on', c === b);
+            drawParty();
+          } }, m[0].toUpperCase() + m.slice(1));
+          return b;
+        }))
+      : null;
+    page.append(el('div', { class: 'card' },
+      el('h3', {}, (t.areaName ? t.areaName + ' · ' : '') + profLabel(prof)),
+      segBar, partyWrap));
+    function setLine(label, value) {
+      return value ? el('div', { class: 'kv' }, el('span', { class: 'k' }, label), el('span', {}, value)) : null;
+    }
+    function drawParty() {
+      partyWrap.textContent = '';
+      for (const pm of t[mode] || []) {
+        const rec = hackSpeciesRec(pm.species, prof);
+        if (!rec) continue;
+        const abSlot = (rec.s.abilities || [])[pm.ability];
+        const abName = abSlot ? ((hd.abilities[Array.isArray(abSlot) ? abSlot[0] : abSlot] || {}).names || [])[0] : null;
+        const item = pm.item ? (hd.items[pm.item] || {}).name : null;
+        const nature = hd.natures ? hd.natures[pm.nature] : null;
+        const evs = (pm.EVs || []).some((v) => v > 0)
+          ? 'HP ' + pm.EVs[0] + ' / Atk ' + pm.EVs[1] + ' / Def ' + pm.EVs[2] + ' / Spe ' + pm.EVs[3] + ' / SpA ' + pm.EVs[4] + ' / SpD ' + pm.EVs[5] : null;
+        const ivs = (pm.IVs || []).some((v) => v !== 31)
+          ? 'HP ' + pm.IVs[0] + ' / Atk ' + pm.IVs[1] + ' / Def ' + pm.IVs[2] + ' / Spe ' + pm.IVs[3] + ' / SpA ' + pm.IVs[4] + ' / SpD ' + pm.IVs[5] : null;
+        partyWrap.append(el('div', { class: 'card inner' },
+          el('button', { class: 'row', style: 'border:none;padding:0 0 6px;background:none', onclick: () => openSpecies(rec) },
+            iconEl(rec),
+            el('div', { class: 'body' },
+              el('div', { class: 'name' }, rec.name + (pm.shiny ? ' ✨' : '') + ' · Lv ' + pm.level),
+              el('div', { class: 'sub' }, rec.types.join(' / '))),
+            el('div', { class: 'end' }, typeRow(rec.types))),
+          setLine('Item', item),
+          setLine('Ability', abName),
+          setLine('Nature', nature),
+          setLine('EVs', evs),
+          setLine('IVs', ivs),
+          el('div', { class: 'moveinline' },
+            (pm.moves || []).filter(Boolean).map((mid) => {
+              const mv = hackMoveRec(mid, prof);
+              return mv ? el('button', { class: 'chip', onclick: () => openMove(mv) }, mv.name) : null;
+            }))));
+      }
+      if (!partyWrap.children.length) partyWrap.append(el('div', { class: 'empty' }, 'No party data.'));
+    }
+    drawParty();
+  });
+}
+
 // ---------- Teams tab ----------
 function viewTeams() {
   if (state.teamOpen != null && teams[state.teamOpen]) return viewTeamEditor(state.teamOpen);
@@ -959,22 +1342,23 @@ function viewTeamEditor(ti) {
       return;
     }
     const rec = getSpecies(mon.sp, team.profile);
-    if (!rec) { team.mons[si] = null; return; }
+    if (!rec) {
+      slots.append(el('button', { class: 'slot', onclick: () => { team.mons[si] = null; saveTeams(); redraw(); } },
+        el('span', { class: 'si' }, 'Unavailable in ' + profLabel(team.profile)), el('span', { class: 'si' }, 'Tap to clear')));
+      return;
+    }
     slots.append(el('button', { class: 'slot filled', onclick: () => openMonEditor(team, si, redraw) },
       iconEl(rec, 1.2),
-      el('span', { class: 'sn' }, rec.name),
+      el('span', { class: 'sn' }, rec.name + (mon.shiny ? ' ✨' : '')),
       el('span', { class: 'si' }, [mon.item, mon.ability].filter(Boolean).join(' · ') || 'Tap to edit')));
   });
 
-  // type coverage: how many members are weak / resistant per attacking type
   const covered = team.mons.filter(Boolean).map((m) => getSpecies(m.sp, team.profile)).filter(Boolean);
   const cov = el('div', { class: 'covgrid' });
-  const typeNames = team.profile === 'rr'
-    ? Object.values(D.rr.types).map((t) => t.name) : TYPES;
-  for (const t of typeNames) {
+  for (const t of typesFor(team.profile)) {
     let weak = 0, res = 0;
     for (const rec of covered) {
-      const m = defenseProfile(rec)[t];
+      const m = defenseProfile(rec, team.profile)[t];
       if (m > 1) weak++; else if (m < 1) res++;
     }
     cov.append(el('div', { class: 'covcell', style: 'background:' + (TYPE_COLORS[t] || '#68A090') },
@@ -1010,30 +1394,40 @@ function pickSpecies(team, si, done) {
     speciesList(team.profile).map((r) => ({ label: r.name, sub: r.dexno + ' · BST ' + r.bst, rec: r, value: r })),
     (r) => {
       team.mons[si] = { sp: r.key, ability: r.abilities[0] ? r.abilities[0].name : '', item: '',
-        nature: 'Hardy', level: 100, moves: [null, null, null, null] };
+        nature: 'Hardy', level: 100, shiny: false, moves: [null, null, null, null],
+        evs: { hp: 0, atk: 0, def: 0, spa: 0, spd: 0, spe: 0 },
+        ivs: { hp: 31, atk: 31, def: 31, spa: 31, spd: 31, spe: 31 } };
       saveTeams();
       done();
     });
 }
 function openMonEditor(team, si, done) {
   const mon = team.mons[si];
+  mon.evs = mon.evs || { hp: 0, atk: 0, def: 0, spa: 0, spd: 0, spe: 0 };
+  mon.ivs = mon.ivs || { hp: 31, atk: 31, def: 31, spa: 31, spd: 31, spe: 31 };
   const rec = getSpecies(mon.sp, team.profile);
   openSheet(rec.name, (body, sheet) => {
     const page = el('div', { class: 'page' });
     const save = () => saveTeams();
 
-    page.append(el('div', { class: 'hero' }, spriteEl(rec),
-      el('div', {},
+    let art = spriteEl(rec, !!mon.shiny);
+    const shinyBtn = el('button', { class: 'chip shinybtn' + (mon.shiny ? ' on' : ''), onclick: () => {
+      mon.shiny = !mon.shiny; save();
+      shinyBtn.classList.toggle('on', !!mon.shiny);
+      const next = spriteEl(rec, !!mon.shiny);
+      art.replaceWith(next); art = next;
+    } }, '✨ Shiny');
+    page.append(el('div', { class: 'hero' }, art,
+      el('div', { style: 'flex:1' },
         el('div', { class: 'dexno' }, rec.dexno),
         el('h2', {}, rec.name),
-        el('div', { style: 'margin-top:6px' }, typeRow(rec.types)))));
+        el('div', { style: 'margin-top:6px' }, typeRow(rec.types)),
+        el('div', { style: 'margin-top:8px' }, shinyBtn))));
 
-    // ability
     const abSel = el('select', { class: 'fsel', onchange: () => { mon.ability = abSel.value; save(); } },
       rec.abilities.map((a) => el('option', { value: a.name }, a.name + (a.hidden ? ' (Hidden)' : ''))));
     abSel.value = mon.ability || (rec.abilities[0] || {}).name || '';
 
-    // item
     const itemBtn = el('button', { class: 'fsel', onclick: () => {
       pickerSheet('Choose Item',
         itemsList(team.profile).map((it) => ({ label: it.name, sub: it.desc, value: it.name })),
@@ -1041,28 +1435,49 @@ function openMonEditor(team, si, done) {
         [{ label: 'No Item', value: '__none' }]);
     } }, el('span', { class: 'v' }, mon.item || 'None'), el('span', { class: 'muted' }, '›'));
 
-    // nature + level
-    const natSel = el('select', { class: 'fsel', onchange: () => { mon.nature = natSel.value; save(); } },
+    const natSel = el('select', { class: 'fsel', onchange: () => { mon.nature = natSel.value; save(); updateCalc(); } },
       NATURES.map((n) => {
         const fx = natureFx(n);
         return el('option', { value: n }, n + (fx ? ` (+${STAT_NAMES[fx.plus]} −${STAT_NAMES[fx.minus]})` : ' (neutral)'));
       }));
     natSel.value = mon.nature || 'Hardy';
     const lvl = el('input', { class: 'fsel', type: 'number', min: 1, max: 100, value: mon.level || 100,
-      onchange: () => { mon.level = Math.max(1, Math.min(100, +lvl.value || 100)); save(); } });
+      onchange: () => { mon.level = Math.max(1, Math.min(100, +lvl.value || 100)); save(); updateCalc(); } });
 
-    // moves
+    // ---- EV / IV / computed stats ----
+    const calcCells = {}, evTotalEl = el('div', { class: 'evtotal' });
+    function updateCalc() {
+      let total = 0;
+      for (const k of STAT_KEYS) {
+        total += mon.evs[k] || 0;
+        if (calcCells[k]) calcCells[k].textContent = calcStat(k, rec.stats[k], mon.ivs[k], mon.evs[k], mon.level || 100, mon.nature);
+      }
+      evTotalEl.textContent = 'EVs used: ' + total + ' / 510';
+      evTotalEl.classList.toggle('over', total > 510);
+    }
+    const evGrid = el('div', { class: 'evgrid' },
+      el('span', { class: 'evh' }, 'Stat'), el('span', { class: 'evh' }, 'Base'),
+      el('span', { class: 'evh' }, 'EV'), el('span', { class: 'evh' }, 'IV'), el('span', { class: 'evh' }, '@Lv'),
+      STAT_KEYS.map((k) => {
+        const evIn = el('input', { type: 'number', inputmode: 'numeric', min: 0, max: 252, value: mon.evs[k] || 0,
+          oninput: () => { mon.evs[k] = Math.max(0, Math.min(252, +evIn.value || 0)); save(); updateCalc(); } });
+        const ivIn = el('input', { type: 'number', inputmode: 'numeric', min: 0, max: 31, value: mon.ivs[k] ?? 31,
+          oninput: () => { mon.ivs[k] = Math.max(0, Math.min(31, +ivIn.value || 0)); save(); updateCalc(); } });
+        calcCells[k] = el('span', { class: 'evcalc' }, '');
+        return [el('span', { class: 'evh' }, STAT_NAMES[k]), el('span', { class: 'evbase' }, rec.stats[k]), evIn, ivIn, calcCells[k]];
+      }));
+
     const legal = legalMoves(rec, team.profile);
     const moveBtns = el('div', { class: 'movegrid' });
     mon.moves.forEach((mk, mi) => {
-      const cur = mk ? getMove(mk) : null;
+      const cur = mk ? getMove(mk, team.profile) : null;
       const b = el('button', { class: 'fsel', onclick: () => {
         pickerSheet('Move ' + (mi + 1),
           legal.map((mv) => ({ label: mv.name, sub: mv.type + ' · ' + mv.cat + ' · ' + (mv.power || '—') + ' BP', value: mv.key })),
           (v) => {
             mon.moves[mi] = v === '__none' ? null : v;
             save();
-            const nm = mon.moves[mi] ? getMove(mon.moves[mi]).name : '—';
+            const nm = mon.moves[mi] ? getMove(mon.moves[mi], team.profile).name : '—';
             b.firstChild.textContent = nm;
           },
           [{ label: 'Clear slot', value: '__none' }]);
@@ -1078,14 +1493,17 @@ function openMonEditor(team, si, done) {
         el('div', { class: 'field' }, el('label', {}, 'Nature'), natSel),
         el('div', { class: 'field' }, el('label', {}, 'Level'), lvl),
         el('div', { class: 'field' }, el('label', {}, 'Moves (' + legal.length + ' legal)'), moveBtns)),
+      el('div', { class: 'card' },
+        el('h3', {}, 'EVs · IVs · Stats'),
+        evGrid, evTotalEl),
       el('div', { class: 'btnrow' },
         el('button', { class: 'btn sec', onclick: () => { closeSheet(sheet); openSpecies(rec); } }, 'View Dex Entry'),
         el('button', { class: 'btn danger', onclick: () => {
           team.mons[si] = null; save(); closeSheet(sheet); done();
         } }, 'Remove')));
     body.append(page);
-    const origClose = sheet.querySelector('.back');
-    origClose.addEventListener('click', done);
+    updateCalc();
+    sheet.querySelector('.back').addEventListener('click', done);
   });
 }
 
