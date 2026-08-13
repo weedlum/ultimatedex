@@ -1114,6 +1114,24 @@ function openSpecies(rec) {
     page.append(el('div', { class: 'card' }, el('h3', {}, 'Defenses · ' + profLabel(prof)),
       defRows.length ? defRows : el('div', { class: 'muted' }, 'No weaknesses or resistances.')));
 
+    // alternate forms (grouped by shared base species; works for hacks via psid)
+    const baseOf = (r) => {
+      const e = r.psid && D.dex[r.psid];
+      return e ? toID(e.baseSpecies || e.name) : null;
+    };
+    const myBase = baseOf(rec);
+    if (myBase) {
+      const forms = speciesList(prof).filter((r) => r.key !== rec.key && baseOf(r) === myBase);
+      if (forms.length) {
+        page.append(el('div', { class: 'card' }, el('h3', {}, 'Forms'),
+          el('div', { class: 'list' }, forms.map((r) =>
+            el('button', { class: 'row', onclick: () => openSpecies(r) },
+              iconEl(r),
+              el('div', { class: 'body' }, el('div', { class: 'name' }, r.name)),
+              el('div', { class: 'end' }, typeRow(r.types)))))));
+      }
+    }
+
     const chain = evoChain(rec, prof);
     if (chain.root) {
       const seen = new Set();
