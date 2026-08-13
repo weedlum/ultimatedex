@@ -520,8 +520,12 @@ function defenseProfile(rec, prof) {
 }
 
 // ---------- flavor / game-specific info ----------
+function natNumOf(rec) {
+  const e = rec.psid && D.dex[rec.psid];
+  return e ? e.num : rec.src === 'off' ? rec.num : null;
+}
 function flavorFor(rec, prof) {
-  const num = rec.src === 'off' ? rec.num : (rec.psid && D.dex[rec.psid] ? D.dex[rec.psid].num : null);
+  const num = natNumOf(rec);
   const f = num != null && D.flavor[num];
   if (!f) return null;
   const g = profGen(prof);
@@ -529,6 +533,20 @@ function flavorFor(rec, prof) {
   for (let x = g; x >= 1 && !text; x--) if (f.t[x]) { text = f.t[x]; fromGen = x; }
   if (!text) for (let x = g + 1; x <= 9; x++) if (f.t[x]) { text = f.t[x]; fromGen = x; break; }
   return text ? { genus: f.g, text, fromGen } : (f.g ? { genus: f.g, text: null, fromGen: null } : null);
+}
+function flavorAll(rec) {
+  const num = natNumOf(rec);
+  const f = num != null && D.flavor[num];
+  if (!f) return [];
+  const groups = [];
+  for (let g = 1; g <= 9; g++) {
+    const t = f.t[g];
+    if (!t) continue;
+    const last = groups[groups.length - 1];
+    if (last && last.text === t) last.gens.push(g);
+    else groups.push({ gens: [g], text: t });
+  }
+  return groups;
 }
 function hackChanges(rec) {
   if (!rec.psid) return null;
@@ -832,7 +850,8 @@ function openSheet(title, build) {
       el('div', { class: 'hrow' },
         el('div', { class: 'htitle' },
           el('button', { class: 'back', onclick: () => closeSheet(sheet) }, '‹ Back'),
-          el('span', {}, title)))),
+          el('span', {}, title)),
+        el('button', { class: 'back', title: 'Back to the list', onclick: () => closeAllSheets() }, '✕'))),
     body);
   const sheet = el('div', { class: 'sheet', onclick: (ev) => { if (ev.target === sheet) closeSheet(sheet); } }, panel);
   document.body.append(sheet);
@@ -1062,8 +1081,16 @@ function speciesRow(rec) {
     el('div', { class: 'end' }, typeRow(rec.types), el('span', { class: 'stat' }, 'BST ' + rec.bst)));
 }
 
+function resolveInProfile(rec) {
+  // an evolution/form link built from raw official data should land on the
+  // ACTIVE dex's entry (Pokopia numbering, roster info, …) when it has one
+  if (rec.src !== 'off') return rec;
+  const match = speciesList(rec.prof ?? state.profile).find((r) => r.key === rec.key);
+  return match || rec;
+}
 function openSpecies(rec) {
-  openSheet(rec.name, (body) => {
+  rec = resolveInProfile(rec);
+  openSheet(rec.name, (body, sheet) => {
     const prof = rec.prof ?? state.profile;
     const gen = profGen(prof);
     const flavor = flavorFor(rec, prof);
@@ -1077,6 +1104,7 @@ function openSpecies(rec) {
       if (rec.e.weightkg) meta.push(rec.e.weightkg + ' kg');
       if (rec.e.forme) meta.push(rec.e.forme + ' Forme');
     }
+    if (prof === 'pokopia' && !rec.pokopia) meta.push('Not in the Pokopia dex');
     const shinyBtn = el('button', { class: 'chip shinybtn', onclick: () => {
       shiny = !shiny;
       shinyBtn.classList.toggle('on', shiny);
@@ -1093,10 +1121,36 @@ function openSpecies(rec) {
     const page = el('div', { class: 'page' }, hero);
     body.append(page);
 
+    // previous / next entry in the active dex
+    const listAll = speciesList(prof);
+    const idx = listAll.findIndex((r) => r.key === rec.key);
+    if (idx >= 0 && listAll.length > 1) {
+      const prev = listAll[idx - 1], next = listAll[idx + 1];
+      const jump = (r) => { closeSheet(sheet); openSpecies(r); };
+      page.append(el('div', { class: 'btnrow' },
+        prev ? el('button', { class: 'btn sec', onclick: () => jump(prev) }, '‹ ' + prev.name) : el('span', { style: 'flex:1' }),
+        next ? el('button', { class: 'btn sec', onclick: () => jump(next) }, next.name + ' ›') : el('span', { style: 'flex:1' })));
+    }
+
     if (flavor && flavor.text) {
-      page.append(el('div', { class: 'card' },
+      const card = el('div', { class: 'card' },
         el('h3', {}, 'Dex Entry' + (flavor.fromGen ? ' · Gen ' + flavor.fromGen + ' games' : '')),
-        el('div', { class: 'flavor' }, flavor.text)));
+        el('div', { class: 'flavor' }, flavor.text));
+      const groups = flavorAll(rec).filter((g) => g.text !== flavor.text || g.gens.length > 1);
+      if (groups.length) {
+        const wrap = el('div', { style: 'display:none' },
+          groups.map((g) => [
+            el('h3', { style: 'margin-top:12px' },
+              'Gen ' + (g.gens.length > 1 ? g.gens[0] + '–' + g.gens[g.gens.length - 1] : g.gens[0])),
+            el('div', { class: 'flavor' }, g.text)]));
+        const btn = el('button', { class: 'chip', style: 'margin-top:10px', onclick: () => {
+          const open = wrap.style.display === 'none';
+          wrap.style.display = open ? 'block' : 'none';
+          btn.textContent = open ? 'Hide other games' : 'All games (' + groups.length + ')';
+        } }, 'All games (' + groups.length + ')');
+        card.append(btn, wrap);
+      }
+      page.append(card);
     }
 
     if (rec.pokopia) {
