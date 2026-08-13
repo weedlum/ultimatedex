@@ -275,7 +275,7 @@ nav button .ni { font-size: 20px; line-height: 1; }
 }
 .rotom #app > header::before { left: 9px; }
 .rotom #app > header::after { right: 9px; animation-delay: .15s; }
-.rotom #app > header .hrow { padding: 0 28px; }
+.rotom #app > header .hrow { padding: 0 36px; }
 @keyframes rotomblink { 0%, 91%, 100% { transform: scaleY(1); } 94% { transform: scaleY(.1); } 97% { transform: scaleY(1); } }
 @media (prefers-reduced-motion: reduce) {
   .rotom #app > header::before, .rotom #app > header::after { animation: none; }
