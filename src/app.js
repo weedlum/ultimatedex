@@ -966,12 +966,25 @@ function rotomBtn() {
     applyRotom();
   } }, '🔴');
 }
+function fullscreenBtn() {
+  const doc = document;
+  if (!(doc.fullscreenEnabled || doc.webkitFullscreenEnabled)) return null;
+  return el('button', { class: 'chip', title: 'Fullscreen', onclick: () => {
+    const root = doc.documentElement;
+    if (doc.fullscreenElement || doc.webkitFullscreenElement) {
+      (doc.exitFullscreen || doc.webkitExitFullscreen).call(doc);
+    } else {
+      try { (root.requestFullscreen || root.webkitRequestFullscreen).call(root, { navigationUI: 'hide' }); }
+      catch { try { root.webkitRequestFullscreen(); } catch {} }
+    }
+  } }, '⛶');
+}
 function listHeader(title, fkey, chipsBuilder) {
   const f = state.f[fkey];
   const search = el('input', { type: 'search', placeholder: 'Search ' + title.toLowerCase() + '…',
     autocomplete: 'off', value: f.q, oninput: () => { f.q = search.value; refreshers.list && refreshers.list(); } });
   return el('header', {},
-    el('div', { class: 'hrow' }, el('div', { class: 'htitle' }, title), rotomBtn(), profileSelect()),
+    el('div', { class: 'hrow' }, el('div', { class: 'htitle' }, title), fullscreenBtn(), rotomBtn(), profileSelect()),
     el('div', { class: 'searchbar' }, el('span', { class: 'icon' }, '🔎'), search),
     chipsBuilder ? chipsBuilder() : null);
 }
@@ -1421,7 +1434,7 @@ function viewTeams() {
   });
   if (!teams.length) list.append(el('div', { class: 'empty' }, 'No teams yet. Build your first squad!'));
   app.append(
-    el('header', {}, el('div', { class: 'hrow' }, el('div', { class: 'htitle' }, 'Teams'), rotomBtn(), profileSelect())),
+    el('header', {}, el('div', { class: 'hrow' }, el('div', { class: 'htitle' }, 'Teams'), fullscreenBtn(), rotomBtn(), profileSelect())),
     el('main', {}, el('div', { class: 'page' },
       el('button', { class: 'btn', onclick: () => { state.teamOpen = newTeam(); render(); } }, '+ New Team (' + profLabel() + ')'),
       list)));
