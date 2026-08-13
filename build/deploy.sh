@@ -9,6 +9,7 @@ node build/prepare.mjs
 W=$(mktemp -d)
 cp dist/UltimateDex.html "$W/index.html"
 cp build/touch-icon.png "$W/icon.png"
+cp build/touch-icon.png "$W/icon-v2.png"
 cd "$W"
 git init -q -b gh-pages
 git config http.postBuffer 524288000
