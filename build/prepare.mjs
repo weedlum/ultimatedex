@@ -261,6 +261,29 @@ for (const [file, defaultCat] of [['data/pokopia-crafting.html', null], ['data/p
 }
 console.log(`pokopia crafting: ${crafting.length} recipes in ${new Set(crafting.map((c) => c.cat)).size} categories`);
 
+// --- Gen-9 flavor text from PokemonDB (PokeAPI's dump is missing most of it)
+const GEN9_GAMES = ['Champions', 'Mega Dimension', 'Legends: Z-A', 'Indigo Disk', 'Teal Mask', 'Violet', 'Scarlet'];
+let pdbFilled = 0;
+try {
+  for (const f of fs.readdirSync(path.join(root, 'data/pdb'))) {
+    const num = parseInt(f);
+    if (!num || !f.endsWith('.html')) continue;
+    const parts = fs.readFileSync(path.join(root, 'data/pdb', f), 'utf8').split('Pokédex entries</h2>');
+    if (parts.length < 2) continue;
+    const sec = parts[1].split('</table>')[0];
+    let best = null;
+    for (const m of sec.matchAll(/<tr>\s*<th[^>]*>([\s\S]*?)<\/th>\s*<td[^>]*>([\s\S]*?)<\/td>/g)) {
+      if (GEN9_GAMES.some((g) => m[1].replace(/<[^>]+>/g, ' ').includes(g))) best = m[2];
+    }
+    if (!best) continue;
+    const text = dec(best);
+    if (!text) continue;
+    const fl = (flavor[num] = flavor[num] || { g: '', t: {} });
+    if (!fl.t[9]) { fl.t[9] = text; pdbFilled++; }
+  }
+} catch (e) { console.warn('pdb flavor skipped:', e.message); }
+console.log('gen9 flavor filled from PokemonDB:', pdbFilled);
+
 const payload = { dex, moves, learnsets, abilities, items, typechart, iconIdx, rr, mods, flavor, hacks,
   pokopia: { roster: pokopia, habitats, crafting } };
 const json = JSON.stringify(payload);

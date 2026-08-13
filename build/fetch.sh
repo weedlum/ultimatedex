@@ -40,4 +40,7 @@ curl -sL -A "$UA" -o data/pokopia-event.html "https://www.serebii.net/pokemonpok
 # Radical Red — official RRDex database (dex.radicalred.net)
 curl -sL -o data/rr-data.js "https://raw.githubusercontent.com/JwowSquared/Radical-Red-Pokedex/master/data.js"
 
+# Gen-9 dex entries (PokeAPI lacks them)
+./build/fetch-gen9-flavor.sh
+
 ls -la data/
