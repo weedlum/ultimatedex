@@ -135,11 +135,12 @@ function HD(prof) {
   return customs[prof] ? customs[prof].data : null;
 }
 if (isHack(state.profile) && !HD(state.profile)) state.profile = 'nat';
-function profGen(prof) { const p = prof ?? state.profile; return p === 'nat' || isHack(p) ? 9 : +p; }
+function profGen(prof) { const p = prof ?? state.profile; return +p >= 1 && +p <= 9 ? +p : 9; }
 function profiles() {
   return [
     ...[1,2,3,4,5,6,7,8,9].map((g) => ({ id: String(g), label: 'Gen ' + g, group: 'Official' })),
     { id: 'nat', label: 'National Dex', group: 'Official' },
+    { id: 'pokopia', label: 'Pokopia', group: 'Official' },
     { id: 'rr', label: 'Radical Red', group: 'Rom-hacks' },
     ...Object.entries(D.hacks || {}).map(([k, h]) => ({ id: 'b:' + k, label: h.name, group: 'Rom-hacks' })),
     ...Object.values(customs).map((p) => ({ id: p.id, label: p.name, group: 'Rom-hacks' })),
@@ -257,6 +258,23 @@ function speciesList(prof) {
     const hd = HD(prof);
     if (hd) for (const id in hd.species) { const r = hackSpeciesRec(id, prof); if (r) out.push(r); }
     out.sort((a, b) => a.num - b.num || (a.s.order || 0) - (b.s.order || 0));
+  } else if (prof === 'pokopia') {
+    const OFFSET = { base: 0, basin: 10000, event: 20000 };
+    const LABEL = { base: '#', basin: 'Basin #', event: 'Event #' };
+    const seen = new Map();
+    for (const e of D.pokopia || []) {
+      const psid = D.dex[e.slug] ? e.slug : rrPsId(e.name);
+      if (!psid || !D.dex[psid] || !D.dex[psid].baseStats) continue;
+      if (seen.has(psid)) { seen.get(psid).pokopia.sets.push(e.set); continue; }
+      const r = offSpeciesRec(psid, prof);
+      if (!r) continue;
+      r.num = OFFSET[e.set] + e.n;
+      r.dexno = LABEL[e.set] + String(e.n).padStart(3, '0');
+      r.pokopia = { spec: e.spec, sets: [e.set] };
+      seen.set(psid, r);
+      out.push(r);
+    }
+    out.sort((a, b) => a.num - b.num);
   } else {
     const gen = prof === 'nat' ? 0 : +prof;
     for (const id in D.dex) { const e = D.dex[id]; if (offAvailable(e, gen)) out.push(offSpeciesRec(id, prof)); }
@@ -302,8 +320,8 @@ function movesList(prof) {
     const hd = HD(prof);
     if (hd) for (const id in hd.moves) { const r = hackMoveRec(id, prof); if (r) out.push(r); }
   } else {
-    const gen = prof === 'nat' ? 9 : +prof;
-    const nat = prof === 'nat';
+    const gen = profGen(prof);
+    const nat = prof === 'nat' || prof === 'pokopia';
     for (const id in D.moves) {
       const m = D.moves[id];
       if (['CAP', 'Custom', 'LGPE'].includes(m.isNonstandard)) continue;
@@ -1075,6 +1093,13 @@ function openSpecies(rec) {
       page.append(el('div', { class: 'card' },
         el('h3', {}, 'Dex Entry' + (flavor.fromGen ? ' · Gen ' + flavor.fromGen + ' games' : '')),
         el('div', { class: 'flavor' }, flavor.text)));
+    }
+
+    if (rec.pokopia) {
+      const SETS = { base: 'Base game', basin: 'Bubbly Basin (Expansion Pass)', event: 'Event' };
+      page.append(el('div', { class: 'card' }, el('h3', {}, 'Pokopia'),
+        el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Specialty'), el('span', {}, rec.pokopia.spec || '—')),
+        el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Available in'), el('span', {}, rec.pokopia.sets.map((s) => SETS[s] || s).join(', ')))));
     }
 
     // stats (gen 1 had a unified Special stat)

@@ -31,6 +31,12 @@ curl -sL -o data/icons.png "https://play.pokemonshowdown.com/sprites/pokemonicon
 curl -sL -o data/itemicons.png "https://play.pokemonshowdown.com/sprites/itemicons-sheet.png"
 curl -sL -o data/battle-dex-data.ts "https://raw.githubusercontent.com/smogon/pokemon-showdown-client/master/play.pokemonshowdown.com/src/battle-dex-data.ts"
 
+# Pokopia roster (Serebii list pages)
+UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"
+curl -sL -A "$UA" -o data/pokopia-available.html "https://www.serebii.net/pokemonpokopia/availablepokemon.shtml"
+curl -sL -A "$UA" -o data/pokopia-basin.html "https://www.serebii.net/pokemonpokopia/basinpokedex.shtml"
+curl -sL -A "$UA" -o data/pokopia-event.html "https://www.serebii.net/pokemonpokopia/eventpokedex.shtml"
+
 # Radical Red — official RRDex database (dex.radicalred.net)
 curl -sL -o data/rr-data.js "https://raw.githubusercontent.com/JwowSquared/Radical-Red-Pokedex/master/data.js"
 

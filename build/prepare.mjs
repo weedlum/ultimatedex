@@ -185,7 +185,30 @@ for (const [key, name] of [['unbound', 'Unbound'], ['rowe', 'R.O.W.E'], ['ie', '
   } catch (e) { console.warn(`skipping hack ${name}: ${e.message}`); }
 }
 
-const payload = { dex, moves, learnsets, abilities, items, typechart, iconIdx, rr, mods, flavor, hacks };
+// --- Pokopia roster (scraped from Serebii's list pages) ---------------------
+function parsePokopia(file, set) {
+  let h;
+  try { h = read(file); } catch { return []; }
+  const dec = (s) => s.replace(/&eacute;/g, 'é').replace(/&Eacute;/g, 'É').replace(/&amp;/g, '&')
+    .replace(/&#(\d+);/g, (m, d) => String.fromCharCode(+d)).replace(/<[^>]+>/g, '').trim();
+  const out = [];
+  for (const c of h.split('<td class="cen">#').slice(1)) {
+    const n = parseInt(c);
+    const slug = (c.match(/pokedex\/([a-z0-9]+)\.shtml/) || [])[1];
+    const name = dec((c.match(/<u>([^<]+)<\/u>/) || [])[1] || '');
+    const spec = dec((c.match(/specialty\/[a-z]+\.shtml"><u>([^<]+)<\/u>/) || [])[1] || '');
+    if (n && slug && name) out.push({ n, name, slug, spec, set });
+  }
+  return out;
+}
+const pokopia = [
+  ...parsePokopia('data/pokopia-available.html', 'base'),
+  ...parsePokopia('data/pokopia-basin.html', 'basin'),
+  ...parsePokopia('data/pokopia-event.html', 'event'),
+];
+console.log(`pokopia: ${pokopia.filter((x) => x.set === 'base').length} base, ${pokopia.filter((x) => x.set === 'basin').length} basin, ${pokopia.filter((x) => x.set === 'event').length} event`);
+
+const payload = { dex, moves, learnsets, abilities, items, typechart, iconIdx, rr, mods, flavor, hacks, pokopia };
 const json = JSON.stringify(payload);
 const gz = zlib.gzipSync(json, { level: 9 });
 const b64 = gz.toString('base64');
