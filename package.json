@@ -1,0 +1,14 @@
+{
+  "name": "pokedex",
+  "version": "1.0.0",
+  "description": "A complete Pokédex as **one self-contained HTML file** (~1.7MB). No server, no accounts, works offline. Covers all official generations plus **Radical Red** (via the official RRDex database).",
+  "scripts": {},
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "chrome-remote-interface": "^0.34.0"
+  },
+  "private": true
+}

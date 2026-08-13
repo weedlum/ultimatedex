@@ -26,8 +26,9 @@ for f in abilities items typechart; do
   curl -sL -o "data/$f.js" "https://play.pokemonshowdown.com/data/$f.js"
 done
 
-# Icon spritesheet + form icon indexes
+# Icon spritesheets + form icon indexes
 curl -sL -o data/icons.png "https://play.pokemonshowdown.com/sprites/pokemonicons-sheet.png"
+curl -sL -o data/itemicons.png "https://play.pokemonshowdown.com/sprites/itemicons-sheet.png"
 curl -sL -o data/battle-dex-data.ts "https://raw.githubusercontent.com/smogon/pokemon-showdown-client/master/play.pokemonshowdown.com/src/battle-dex-data.ts"
 
 # Radical Red — official RRDex database (dex.radicalred.net)

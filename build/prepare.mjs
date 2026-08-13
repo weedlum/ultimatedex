@@ -174,13 +174,46 @@ const flavor = {};
   }
 }
 
-const payload = { dex, moves, learnsets, abilities, items, typechart, iconIdx, rr, mods, flavor };
+// --- Built-in rom-hack dexes (scraped via ydarissep dex sites) --------------
+const { default: convertYda } = await import('./convert-yda.mjs');
+const hacks = {};
+for (const [key, name] of [['unbound', 'Unbound'], ['rowe', 'R.O.W.E'], ['ie', 'Inclement Emerald']]) {
+  const file = `data/hacks/${key}.json`;
+  try {
+    hacks[key] = { name, data: convertYda(JSON.parse(read(file))) };
+    console.log(`hack ${name}: ${Object.keys(hacks[key].data.species).length} species, ${Object.keys(hacks[key].data.trainers).length} trainers`);
+  } catch (e) { console.warn(`skipping hack ${name}: ${e.message}`); }
+}
+
+const payload = { dex, moves, learnsets, abilities, items, typechart, iconIdx, rr, mods, flavor, hacks };
 const json = JSON.stringify(payload);
 const gz = zlib.gzipSync(json, { level: 9 });
 const b64 = gz.toString('base64');
 const icons = fs.readFileSync(path.join(root, 'data/icons.png')).toString('base64');
+const itemicons = fs.readFileSync(path.join(root, 'data/itemicons.png')).toString('base64');
 
 console.log(`payload: ${(json.length / 1e6).toFixed(2)}MB json -> ${(gz.length / 1024).toFixed(0)}KB gz`);
+
+// --- Embedded renders payload (Pokémon HOME webp + forme pixel sprites) -----
+function spriteMap(dir, ext) {
+  const out = {};
+  const p = path.join(root, 'build/sprite-cache', dir);
+  if (!fs.existsSync(p)) return out;
+  for (const f of fs.readdirSync(p)) {
+    if (!f.endsWith(ext)) continue;
+    out[f.slice(0, -ext.length)] = fs.readFileSync(path.join(p, f)).toString('base64');
+  }
+  return out;
+}
+const sprites = {
+  home: spriteMap('webp', '.webp'),
+  homeShiny: spriteMap('webp-shiny', '.webp'),
+  gen5: spriteMap('gen5', '.png'),
+  gen5Shiny: spriteMap('gen5-shiny', '.png'),
+};
+const spritesJson = JSON.stringify(sprites);
+const spritesB64 = zlib.gzipSync(spritesJson, { level: 9 }).toString('base64');
+console.log(`sprites: home ${Object.keys(sprites.home).length}/${Object.keys(sprites.homeShiny).length} shiny, gen5 formes ${Object.keys(sprites.gen5).length}/${Object.keys(sprites.gen5Shiny).length} -> ${(spritesB64.length / 1e6).toFixed(2)}MB b64`);
 
 // --- Assemble --------------------------------------------------------------
 // String.prototype.replace treats $ specially; always pass replacer functions.
@@ -190,7 +223,9 @@ const app = read('src/app.js');
 const inner = read('src/body.html')
   .replace('/*__STYLE__*/', () => style)
   .replace('__ICONS_B64__', () => icons)
+  .replace('__ITEMICONS_B64__', () => itemicons)
   .replace('__DATA_B64__', () => b64)
+  .replace('__SPRITES_B64__', () => spritesB64)
   .replace('/*__APP__*/', () => app);
 
 const standalone = read('src/shell.html').replace('<!--__BODY__-->', () => inner);

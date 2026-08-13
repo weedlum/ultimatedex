@@ -12,9 +12,22 @@ async function inflate(b64) {
   return new Response(stream).json();
 }
 const D = await inflate(document.getElementById('data-b64').textContent.trim());
+// second payload: embedded renders — inflated in the background so boot stays fast
+let SP = null;
+const spReady = (async () => {
+  try {
+    const t = document.getElementById('sprites-b64');
+    if (t && t.textContent.length > 100) SP = await inflate(t.textContent.trim());
+  } catch {}
+  if (!SP) SP = {};
+})();
 document.documentElement.style.setProperty(
   '--icons',
   "url('data:image/png;base64," + document.getElementById('icons-b64').textContent.trim() + "')"
+);
+document.documentElement.style.setProperty(
+  '--itemicons',
+  "url('data:image/png;base64," + document.getElementById('itemicons-b64').textContent.trim() + "')"
 );
 
 // ============================== constants ================================
@@ -114,10 +127,11 @@ const state = {
     trainers: { q: '' },
   },
 };
-function isHack(prof) { prof = prof ?? state.profile; return prof === 'rr' || String(prof).startsWith('h:'); }
+function isHack(prof) { prof = prof ?? state.profile; return prof === 'rr' || String(prof).startsWith('h:') || String(prof).startsWith('b:'); }
 function HD(prof) {
   prof = prof ?? state.profile;
   if (prof === 'rr') return D.rr;
+  if (String(prof).startsWith('b:')) { const h = (D.hacks || {})[prof.slice(2)]; return h ? h.data : null; }
   return customs[prof] ? customs[prof].data : null;
 }
 if (isHack(state.profile) && !HD(state.profile)) state.profile = 'nat';
@@ -127,6 +141,7 @@ function profiles() {
     ...[1,2,3,4,5,6,7,8,9].map((g) => ({ id: String(g), label: 'Gen ' + g, group: 'Official' })),
     { id: 'nat', label: 'National Dex', group: 'Official' },
     { id: 'rr', label: 'Radical Red', group: 'Rom-hacks' },
+    ...Object.entries(D.hacks || {}).map(([k, h]) => ({ id: 'b:' + k, label: h.name, group: 'Rom-hacks' })),
     ...Object.values(customs).map((p) => ({ id: p.id, label: p.name, group: 'Rom-hacks' })),
   ];
 }
@@ -568,8 +583,8 @@ function hackEncounters(hackId, prof) {
         const method = k.slice(5).replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase());
         for (const slot in area[k]) {
           for (const ent of area[k][slot]) {
-            const [sid, lo, hi] = ent;
-            (idx[sid] = idx[sid] || []).push({ area: area.name, method, lo, hi });
+            const [sid, lo, hi, rate] = ent;
+            (idx[sid] = idx[sid] || []).push({ area: area.name, method, lo, hi, rate });
           }
         }
       }
@@ -693,35 +708,83 @@ function iconEl(rec, scale) {
   if (scale) d.style.transform = `scale(${scale})`;
   return d;
 }
+function spriteFileId(psid) {
+  const e = D.dex[psid];
+  // Showdown sprite files use base-forme naming: "charizard-megax.png"
+  return e && e.forme ? toID(e.baseSpecies) + '-' + toID(e.forme) : psid;
+}
 function spriteUrls(rec, shiny) {
   const urls = [];
   if (rec.sprite && !shiny) urls.push(rec.sprite);
   const psid = rec.psid;
   if (psid) {
     const e = D.dex[psid];
+    const fid = spriteFileId(psid);
     if (e && !e.forme && e.num > 0) {
       // Pokémon HOME official 3D renders (base forms; PokeAPI hosts by dex number)
       urls.push('https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/home/' + (shiny ? 'shiny/' : '') + e.num + '.png');
     }
     // Showdown animated 3D model sprites (cover alternate formes + shiny)
-    urls.push('https://play.pokemonshowdown.com/sprites/' + (shiny ? 'ani-shiny' : 'ani') + '/' + psid + '.gif');
-    urls.push('https://play.pokemonshowdown.com/sprites/' + (shiny ? 'gen5-shiny' : 'gen5') + '/' + psid + '.png');
+    urls.push('https://play.pokemonshowdown.com/sprites/' + (shiny ? 'ani-shiny' : 'ani') + '/' + fid + '.gif');
+    urls.push('https://play.pokemonshowdown.com/sprites/' + (shiny ? 'gen5-shiny' : 'gen5') + '/' + fid + '.png');
   }
   if (rec.sprite && shiny) urls.push(rec.sprite);
   return urls;
 }
+function embeddedSprite(rec, shiny) {
+  if (!SP) return null;
+  const psid = rec.psid;
+  const e = psid && D.dex[psid];
+  if (e && !e.forme && e.num > 0) {
+    const m = (shiny ? SP.homeShiny : SP.home) || {};
+    if (m[e.num]) return 'data:image/webp;base64,' + m[e.num];
+  }
+  if (psid) {
+    const m = (shiny ? SP.gen5Shiny : SP.gen5) || {};
+    const fid = spriteFileId(psid);
+    if (m[fid]) return 'data:image/png;base64,' + m[fid];
+  }
+  if (rec.sprite && !shiny) return rec.sprite;
+  return null;
+}
 function spriteEl(rec, shiny) {
   const holder = el('div', { class: 'art' });
-  const urls = spriteUrls(rec, shiny);
-  (function tryAt(i) {
-    if (i >= urls.length) { holder.textContent = ''; holder.append(iconEl(rec, 2)); return; }
-    const img = el('img', { alt: rec.name });
-    img.onerror = () => tryAt(i + 1);
-    img.src = urls[i];
-    holder.textContent = '';
-    holder.append(img);
-  })(0);
+  const show = () => {
+    const urls = spriteUrls(rec, shiny);
+    const emb = embeddedSprite(rec, shiny);
+    if (emb) {
+      // embedded render first (instant + works offline/hosted), then try to
+      // upgrade to the full-resolution remote version
+      const img = el('img', { alt: rec.name, src: emb });
+      holder.append(img);
+      if (urls.length) {
+        const up = new Image();
+        up.onload = () => { img.src = up.src; };
+        up.src = urls[0];
+      }
+      return;
+    }
+    (function tryAt(i) {
+      if (i >= urls.length) { holder.textContent = ''; holder.append(iconEl(rec, 2)); return; }
+      const img = el('img', { alt: rec.name });
+      img.onerror = () => tryAt(i + 1);
+      img.src = urls[i];
+      holder.textContent = '';
+      holder.append(img);
+    })(0);
+  };
+  if (SP !== null) show(); else spReady.then(show);
   return holder;
+}
+function itemIconEl(nameOrRec) {
+  const name = typeof nameOrRec === 'string' ? nameOrRec : nameOrRec.name;
+  const rec = typeof nameOrRec === 'string' ? null : nameOrRec;
+  let n = rec && rec.src === 'off' ? (D.items[rec.key] || {}).spritenum : null;
+  if (n == null) n = (D.items[toID(name)] || {}).spritenum; // hack items: match by name
+  const d = el('div', { class: 'iicon' });
+  if (n == null) d.style.visibility = 'hidden';
+  else d.style.backgroundPosition = `-${(n % 16) * 24}px -${Math.floor(n / 16) * 24}px`;
+  return d;
 }
 function typeBadge(t) { return el('span', { class: 'type', style: 'background:' + (TYPE_COLORS[t] || '#68A090') }, t); }
 function typeRow(types) { return el('div', { class: 'types' }, types.map(typeBadge)); }
@@ -780,7 +843,7 @@ function pickerSheet(title, items, onPick, extras) {
           el('div', { class: 'body' }, el('div', { class: 'name muted' }, ex.label))));
       chunkList(list, f, (it) =>
         el('button', { class: 'row', onclick: () => { onPick(it.value ?? it); closeSheet(sheet); } },
-          it.rec ? iconEl(it.rec) : null,
+          it.rec ? iconEl(it.rec) : (it.icon ? it.icon() : null),
           el('div', { class: 'body' },
             el('div', { class: 'name' }, it.label),
             it.sub ? el('div', { class: 'sub' }, it.sub) : null)));
@@ -894,12 +957,21 @@ function profileSelect() {
   sel.value = state.profile;
   return sel;
 }
+// Rotom Phone skin (kid-approved)
+function applyRotom() { document.documentElement.classList.toggle('rotom', !!store.get('rotom', true)); }
+applyRotom();
+function rotomBtn() {
+  return el('button', { class: 'chip', title: 'Rotom Phone mode', onclick: () => {
+    store.set('rotom', !store.get('rotom', true));
+    applyRotom();
+  } }, '🔴');
+}
 function listHeader(title, fkey, chipsBuilder) {
   const f = state.f[fkey];
   const search = el('input', { type: 'search', placeholder: 'Search ' + title.toLowerCase() + '…',
     autocomplete: 'off', value: f.q, oninput: () => { f.q = search.value; refreshers.list && refreshers.list(); } });
   return el('header', {},
-    el('div', { class: 'hrow' }, el('div', { class: 'htitle' }, title), profileSelect()),
+    el('div', { class: 'hrow' }, el('div', { class: 'htitle' }, title), rotomBtn(), profileSelect()),
     el('div', { class: 'searchbar' }, el('span', { class: 'icon' }, '🔎'), search),
     chipsBuilder ? chipsBuilder() : null);
 }
@@ -1028,7 +1100,9 @@ function openSpecies(rec) {
     if (rec.src === 'hack') {
       const held = (rec.s.items || []).filter(Boolean).map((i) => hackItemRec(i, prof)).filter(Boolean);
       if (held.length) page.append(el('div', { class: 'card' }, el('h3', {}, 'Wild Held Items'),
-        held.map((it) => el('div', { class: 'kv' }, el('span', { class: 'k' }, it.name), el('span', {}, '')))));
+        held.map((it) => el('div', { class: 'kv' },
+          el('span', { class: 'k', style: 'display:flex;gap:8px;align-items:center' }, itemIconEl(it), it.name),
+          el('span', {}, '')))));
     }
 
     const def = defenseProfile(rec, prof);
@@ -1064,7 +1138,9 @@ function openSpecies(rec) {
       if (enc.length) page.append(el('div', { class: 'card' }, el('h3', {}, 'Locations · ' + profLabel(prof)),
         enc.map((x) => el('div', { class: 'kv' },
           el('span', { class: 'k' }, x.area),
-          el('span', {}, x.method + ' · Lv ' + (x.lo === x.hi ? x.lo : x.lo + '–' + x.hi))))));
+          el('span', {}, x.method + ' · ' + (x.lo < 0
+            ? (x.rate != null ? x.rate + '%' : 'Wild')
+            : 'Lv ' + (x.lo === x.hi ? x.lo : x.lo + '–' + x.hi)))))));
     }
 
     const ls = getLearnset(rec, prof);
@@ -1208,6 +1284,7 @@ function viewItems() {
     count.textContent = items.length + ' items · ' + profLabel();
     chunkList(list, items, (it) =>
       el('button', { class: 'row', onclick: () => openItem(it) },
+        itemIconEl(it),
         el('div', { class: 'body' },
           el('div', { class: 'name' }, it.name),
           el('div', { class: 'sub' }, it.desc))));
@@ -1218,6 +1295,9 @@ function viewItems() {
 function openItem(it) {
   openSheet(it.name, (body) => {
     body.append(el('div', { class: 'page' },
+      el('div', { class: 'hero' },
+        el('div', { class: 'art', style: 'width:48px;flex-basis:48px' }, (() => { const i = itemIconEl(it); i.style.transform = 'scale(2)'; return i; })()),
+        el('div', {}, el('h2', {}, it.name))),
       el('div', { class: 'card' }, el('h3', {}, 'Effect'), el('div', {}, it.longDesc || it.desc || '—'))));
   });
 }
@@ -1273,7 +1353,8 @@ function openTrainer(t, modes) {
         if (!rec) continue;
         const abSlot = (rec.s.abilities || [])[pm.ability];
         const abName = abSlot ? ((hd.abilities[Array.isArray(abSlot) ? abSlot[0] : abSlot] || {}).names || [])[0] : null;
-        const item = pm.item ? (hd.items[pm.item] || {}).name : null;
+        const itemRec = pm.item ? hackItemRec(pm.item, prof) : null;
+        const item = itemRec ? el('span', { style: 'display:flex;gap:8px;align-items:center' }, itemIconEl(itemRec), itemRec.name) : null;
         const nature = hd.natures ? hd.natures[pm.nature] : null;
         const evs = (pm.EVs || []).some((v) => v > 0)
           ? 'HP ' + pm.EVs[0] + ' / Atk ' + pm.EVs[1] + ' / Def ' + pm.EVs[2] + ' / Spe ' + pm.EVs[3] + ' / SpA ' + pm.EVs[4] + ' / SpD ' + pm.EVs[5] : null;
@@ -1283,7 +1364,7 @@ function openTrainer(t, modes) {
           el('button', { class: 'row', style: 'border:none;padding:0 0 6px;background:none', onclick: () => openSpecies(rec) },
             iconEl(rec),
             el('div', { class: 'body' },
-              el('div', { class: 'name' }, rec.name + (pm.shiny ? ' ✨' : '') + ' · Lv ' + pm.level),
+              el('div', { class: 'name' }, rec.name + (pm.shiny ? ' ✨' : '') + ' · ' + (pm.level > 0 ? 'Lv ' + pm.level : 'Lv scales')),
               el('div', { class: 'sub' }, rec.types.join(' / '))),
             el('div', { class: 'end' }, typeRow(rec.types))),
           setLine('Item', item),
@@ -1322,7 +1403,7 @@ function viewTeams() {
   });
   if (!teams.length) list.append(el('div', { class: 'empty' }, 'No teams yet. Build your first squad!'));
   app.append(
-    el('header', {}, el('div', { class: 'hrow' }, el('div', { class: 'htitle' }, 'Teams'), profileSelect())),
+    el('header', {}, el('div', { class: 'hrow' }, el('div', { class: 'htitle' }, 'Teams'), rotomBtn(), profileSelect())),
     el('main', {}, el('div', { class: 'page' },
       el('button', { class: 'btn', onclick: () => { state.teamOpen = newTeam(); render(); } }, '+ New Team (' + profLabel() + ')'),
       list)));
@@ -1430,7 +1511,7 @@ function openMonEditor(team, si, done) {
 
     const itemBtn = el('button', { class: 'fsel', onclick: () => {
       pickerSheet('Choose Item',
-        itemsList(team.profile).map((it) => ({ label: it.name, sub: it.desc, value: it.name })),
+        itemsList(team.profile).map((it) => ({ label: it.name, sub: it.desc, value: it.name, icon: () => itemIconEl(it) })),
         (v) => { mon.item = v === '__none' ? '' : v; save(); itemBtn.firstChild.textContent = mon.item || 'None'; },
         [{ label: 'No Item', value: '__none' }]);
     } }, el('span', { class: 'v' }, mon.item || 'None'), el('span', { class: 'muted' }, '›'));
