@@ -77,7 +77,8 @@ export default function convertYda(dump) {
 
   const species = {}, sid = {};
   let si = 1;
-  for (const key in dump.species || {}) { sid[key] = si++; }
+  const isReal = (s) => s && (+s.baseHP || 0) + (+s.baseAttack || 0) > 0 && !/^SPECIES_(NONE|EGG)$/.test(s.name || '');
+  for (const key in dump.species || {}) { if (isReal(dump.species[key])) sid[key] = si++; }
 
   const evoText = (evo, targetName) => {
     const [method, param] = evo;
@@ -107,6 +108,7 @@ export default function convertYda(dump) {
   for (const key in dump.species || {}) {
     const s = dump.species[key];
     const num = sid[key];
+    if (!num) continue;
     const evolutions = [], evoTexts = [];
     for (const evo of s.evolution || []) {
       const target = sid[evo[2]];

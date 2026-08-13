@@ -77,9 +77,12 @@ header {
 .htitle .back { font-size: 15px; font-weight: 600; color: var(--accent2); padding: 4px 8px 4px 0; }
 .profile-pill {
   background: var(--card2); border: 1px solid var(--line); border-radius: 99px;
-  padding: 6px 12px; font-weight: 600; font-size: 13px;
+  padding: 6px 10px; font-weight: 600; font-size: 12px;
   appearance: none; -webkit-appearance: none; text-align: center;
+  flex: 0 1 auto; min-width: 0; max-width: 34vw;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+@media (min-width: 700px) { .profile-pill { max-width: 240px; font-size: 13px; } }
 .searchbar {
   display: flex; align-items: center; gap: 6px;
   background: var(--card2); border-radius: 10px; padding: 7px 10px;

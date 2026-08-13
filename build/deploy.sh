@@ -11,9 +11,15 @@ cp dist/UltimateDex.html "$W/index.html"
 cp build/touch-icon.png "$W/icon.png"
 cd "$W"
 git init -q -b gh-pages
+git config http.postBuffer 524288000
+git config http.version HTTP/1.1
 git add -A
 git commit -qm "deploy $(date +%Y-%m-%d_%H:%M)"
-git push -q --force "https://github.com/weedlum/ultimatedex.git" gh-pages
+for i in 1 2 3 4 5; do
+  git push -q --force --no-thin "https://github.com/weedlum/ultimatedex.git" gh-pages && break
+  echo "push attempt $i failed; retrying…"
+  sleep 3
+done
 cd - >/dev/null
 rm -rf "$W"
 
