@@ -843,6 +843,32 @@ function itemIconEl(nameOrRec) {
   else d.style.backgroundPosition = `-${(n % 16) * 24}px -${Math.floor(n / 16) * 24}px`;
   return d;
 }
+function openSpriteViewer(rec, startShiny) {
+  openSheet(rec.name, (body) => {
+    let shiny = !!startShiny;
+    let art = spriteEl(rec, shiny);
+    art.className = 'art zoombig';
+    const shinyBtn = el('button', { class: 'chip shinybtn' + (shiny ? ' on' : ''), onclick: () => {
+      shiny = !shiny;
+      shinyBtn.classList.toggle('on', shiny);
+      const next = spriteEl(rec, shiny);
+      next.className = 'art zoombig';
+      art.replaceWith(next);
+      art = next;
+    } }, '✨ Shiny');
+    body.append(el('div', { class: 'page zoomwrap' },
+      art,
+      el('div', { class: 'dexno' }, rec.dexno + ' · ' + rec.name),
+      shinyBtn));
+  });
+}
+function zoomable(rec, getShiny) {
+  return (holder) => {
+    holder.style.cursor = 'zoom-in';
+    holder.addEventListener('click', () => openSpriteViewer(rec, getShiny()));
+    return holder;
+  };
+}
 function typeBadge(t) { return el('span', { class: 'type', style: 'background:' + (TYPE_COLORS[t] || '#68A090') }, t); }
 function typeRow(types) { return el('div', { class: 'types' }, types.map(typeBadge)); }
 function chunkList(container, items, renderItem, chunk = 80) {
@@ -1143,7 +1169,8 @@ function openSpecies(rec) {
     const gen = profGen(prof);
     const flavor = flavorFor(rec, prof);
     let shiny = false;
-    let art = spriteEl(rec, shiny);
+    const zoom = zoomable(rec, () => shiny);
+    let art = zoom(spriteEl(rec, shiny));
 
     const meta = [];
     if (flavor && flavor.genus) meta.push(flavor.genus);
@@ -1156,7 +1183,7 @@ function openSpecies(rec) {
     const shinyBtn = el('button', { class: 'chip shinybtn', onclick: () => {
       shiny = !shiny;
       shinyBtn.classList.toggle('on', shiny);
-      const next = spriteEl(rec, shiny);
+      const next = zoom(spriteEl(rec, shiny));
       art.replaceWith(next); art = next;
     } }, '✨ Shiny');
     const hero = el('div', { class: 'hero' }, art,
@@ -1914,11 +1941,12 @@ function openMonEditor(team, si, done) {
     const page = el('div', { class: 'page' });
     const save = () => saveTeams();
 
-    let art = spriteEl(rec, !!mon.shiny);
+    const zoom = zoomable(rec, () => !!mon.shiny);
+    let art = zoom(spriteEl(rec, !!mon.shiny));
     const shinyBtn = el('button', { class: 'chip shinybtn' + (mon.shiny ? ' on' : ''), onclick: () => {
       mon.shiny = !mon.shiny; save();
       shinyBtn.classList.toggle('on', !!mon.shiny);
-      const next = spriteEl(rec, !!mon.shiny);
+      const next = zoom(spriteEl(rec, !!mon.shiny));
       art.replaceWith(next); art = next;
     } }, '✨ Shiny');
     page.append(el('div', { class: 'hero' }, art,

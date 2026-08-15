@@ -226,6 +226,16 @@ main { flex: 1; padding: 8px 12px calc(env(safe-area-inset-bottom) + 76px); }
 .sheet header { position: static; }
 .sheet main { overflow-y: auto; -webkit-overflow-scrolling: touch; flex: 1; padding-bottom: calc(env(safe-area-inset-bottom) + 20px); }
 
+/* ---------- sprite zoom viewer ---------- */
+.zoomwrap { align-items: center; text-align: center; padding-top: 6vh; gap: 18px; }
+.zoombig, .zoombig img {
+  width: min(85vw, 460px); height: min(85vw, 460px);
+  max-width: min(85vw, 460px); max-height: min(85vw, 460px);
+  display: flex; align-items: center; justify-content: center;
+  image-rendering: pixelated; object-fit: contain;
+}
+.zoomwrap .shinybtn { font-size: 14px; padding: 9px 18px; }
+
 /* ---------- flavor / EV grid / trainers ---------- */
 .flavor { font-size: 14.5px; line-height: 1.55; }
 .card.inner { background: var(--card2); border: none; margin-bottom: 8px; }
