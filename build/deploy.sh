@@ -7,7 +7,9 @@ cd "$(dirname "$0")/.."
 node build/prepare.mjs
 
 W=$(mktemp -d)
-cp dist/UltimateDex.html "$W/index.html"
+VERSION="ud-$(date +%Y%m%d%H%M%S)"
+sed "s/const BUILD = 'dev'/const BUILD = '$VERSION'/" dist/UltimateDex.html > "$W/index.html"
+printf '%s' "$VERSION" > "$W/version.txt"
 cp build/touch-icon.png "$W/icon.png"
 cp build/touch-icon.png "$W/icon-v2.png"
 cp build/icon-192.png "$W/icon-192.png" 2>/dev/null || true
@@ -28,7 +30,6 @@ cat > "$W/manifest.webmanifest" <<'MANIFEST'
 }
 MANIFEST
 
-VERSION="ud-$(date +%Y%m%d%H%M%S)"
 cat > "$W/sw.js" <<SW
 const CACHE = '$VERSION';
 const ASSETS = ['./', './icon-v2.png', './icon-192.png', './icon-512.png', './manifest.webmanifest'];
@@ -42,9 +43,29 @@ self.addEventListener('activate', (e) => {
 });
 // stale-while-revalidate: serve instantly from cache, refresh in the background;
 // when a NEWER index lands, tell open pages so they can offer a refresh
+// page asks us to download the new build with the page still open,
+// so the 12MB fetch can't be killed by a quick app switch
+self.addEventListener('message', (e) => {
+  if (e.data !== 'ud-refresh') return;
+  e.waitUntil((async () => {
+    let ok = false;
+    try {
+      const res = await fetch('./', { cache: 'reload' });
+      if (res.ok) {
+        const c = await caches.open(CACHE);
+        await c.put('./', res);
+        ok = true;
+      }
+    } catch {}
+    const cs = await self.clients.matchAll();
+    cs.forEach((cl) => cl.postMessage({ udRefreshed: true, ok }));
+  })());
+});
 self.addEventListener('fetch', (e) => {
   const req = e.request;
-  if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
+  const u = new URL(req.url);
+  if (req.method !== 'GET' || u.origin !== location.origin) return;
+  if (u.search) return; // version checks etc. always hit the network
   e.respondWith(caches.match(req).then((cached) => {
     const net = fetch(req).then(async (res) => {
       if (res.ok) {

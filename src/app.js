@@ -1,6 +1,7 @@
 (async function () {
 'use strict';
 const bootEl = document.getElementById('boot');
+const BUILD = 'dev'; // replaced with the deploy version by build/deploy.sh
 try {
 
 // ============================== data =====================================
@@ -1683,7 +1684,9 @@ function viewTeams() {
     el('main', {}, el('div', { class: 'page' },
       el('button', { class: 'btn', onclick: () => { state.teamOpen = newTeam(); render(); } }, '+ New Team (' + profLabel() + ')'),
       el('button', { class: 'btn sec', onclick: openDamageCalc }, '⚔ Damage Calculator'),
-      list)));
+      list,
+      el('div', { class: 'muted', style: 'text-align:center;font-size:11px;padding-top:8px' },
+        'Build ' + BUILD + (BUILD !== 'dev' ? '' : ' (local)')))));
 }
 
 // ---------- damage calculator ----------
@@ -2016,16 +2019,51 @@ render();
 // registration failing elsewhere is expected and harmless)
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
+  const chip = (text, onclick) => {
+    let b = document.getElementById('udupdate');
+    if (!b) {
+      b = el('button', {
+        id: 'udupdate', class: 'chip on',
+        style: 'position:fixed;left:50%;transform:translateX(-50%);z-index:90;' +
+          'bottom:calc(env(safe-area-inset-bottom) + 84px);background:var(--accent2);color:#fff;' +
+          'box-shadow:0 6px 20px rgb(0 0 0 / .4);padding:9px 16px;font-size:13px',
+      });
+      document.body.append(b);
+    }
+    b.textContent = text;
+    b.onclick = onclick || null;
+    return b;
+  };
+  const installUpdate = () => {
+    const c = chip('⬇ Downloading update…', null);
+    let dots = 0;
+    const tick = setInterval(() => { c.textContent = '⬇ Downloading update' + '.'.repeat((dots = dots % 3 + 1)); }, 800);
+    navigator.serviceWorker.ready.then((reg) => reg.active && reg.active.postMessage('ud-refresh'));
+    navigator.serviceWorker.addEventListener('message', function onDone(ev) {
+      if (!ev.data || !ev.data.udRefreshed) return;
+      navigator.serviceWorker.removeEventListener('message', onDone);
+      clearInterval(tick);
+      if (ev.data.ok) location.reload();
+      else chip('⚠ Download failed — tap to retry', installUpdate);
+    });
+  };
   navigator.serviceWorker.addEventListener('message', (ev) => {
-    if (!ev.data || !ev.data.udUpdate || document.getElementById('udupdate')) return;
-    document.body.append(el('button', {
-      id: 'udupdate', class: 'chip on',
-      style: 'position:fixed;left:50%;transform:translateX(-50%);z-index:90;' +
-        'bottom:calc(env(safe-area-inset-bottom) + 84px);background:var(--accent2);color:#fff;' +
-        'box-shadow:0 6px 20px rgb(0 0 0 / .4);padding:9px 16px;font-size:13px',
-      onclick: () => location.reload(),
-    }, '⬆ Update ready — tap to refresh'));
+    if (ev.data && ev.data.udUpdate) chip('⬆ Update ready — tap to refresh', () => location.reload());
   });
+  // explicit version check: tiny version.txt bypasses all caches
+  async function checkUpdate() {
+    if (BUILD === 'dev') return;
+    try {
+      const r = await fetch('version.txt?ts=' + Date.now(), { cache: 'no-store' });
+      if (!r.ok) return;
+      const v = (await r.text()).trim();
+      if (v && v !== BUILD && !document.getElementById('udupdate')) {
+        chip('⬆ Update available — tap to install', installUpdate);
+      }
+    } catch {}
+  }
+  checkUpdate();
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkUpdate(); });
 }
 
 } catch (err) {
