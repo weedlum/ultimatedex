@@ -284,8 +284,51 @@ try {
 } catch (e) { console.warn('pdb flavor skipped:', e.message); }
 console.log('gen9 flavor filled from PokemonDB:', pdbFilled);
 
+// --- Official wild-encounter locations (PokeAPI) ----------------------------
+// enc[num] = { gen: [[area, method, minLv, maxLv, games], ...] }
+const verGenByName = {};
+for (const r of parseCSV(read('data/csv/versions.csv')).slice(1)) verGenByName[r[2]] = vgGen[r[1]];
+const prettyName = (s) => String(s).replace(/-area$/, '').replace(/-/g, ' ')
+  .replace(/(^|\s)\w/g, (c) => c.toUpperCase());
+const enc = {};
+let encRows = 0;
+try {
+  for (const f of fs.readdirSync(path.join(root, 'data/encounters'))) {
+    const num = parseInt(f);
+    if (!num) continue;
+    let locs;
+    try { locs = JSON.parse(fs.readFileSync(path.join(root, 'data/encounters', f), 'utf8')); } catch { continue; }
+    if (!Array.isArray(locs) || !locs.length) continue;
+    const merged = {}; // gen|area|method -> row
+    for (const loc of locs) {
+      const area = prettyName(loc.location_area.name);
+      for (const vd of loc.version_details || []) {
+        const gen = verGenByName[vd.version.name];
+        if (!gen) continue;
+        const game = prettyName(vd.version.name);
+        for (const ed of vd.encounter_details || []) {
+          const method = prettyName(ed.method.name);
+          const key = gen + '|' + area + '|' + method;
+          const row = (merged[key] = merged[key] || { gen, area, method, lo: 999, hi: 0, games: new Set() });
+          row.lo = Math.min(row.lo, ed.min_level);
+          row.hi = Math.max(row.hi, ed.max_level);
+          row.games.add(game);
+        }
+      }
+    }
+    const byGen = {};
+    for (const row of Object.values(merged)) {
+      (byGen[row.gen] = byGen[row.gen] || []).push([row.area, row.method, row.lo, row.hi, [...row.games].join('/')]);
+      encRows++;
+    }
+    for (const g in byGen) byGen[g].sort((a, b) => a[0].localeCompare(b[0]));
+    enc[num] = byGen;
+  }
+} catch (e) { console.warn('encounters skipped:', e.message); }
+console.log(`encounters: ${Object.keys(enc).length} species, ${encRows} rows`);
+
 const payload = { dex, moves, learnsets, abilities, items, typechart, iconIdx, rr, mods, flavor, hacks,
-  pokopia: { roster: pokopia, habitats, crafting } };
+  pokopia: { roster: pokopia, habitats, crafting }, enc };
 const json = JSON.stringify(payload);
 const gz = zlib.gzipSync(json, { level: 9 });
 const b64 = gz.toString('base64');

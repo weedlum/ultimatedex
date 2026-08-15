@@ -564,6 +564,24 @@ function hackChanges(rec) {
   return diffs.length ? diffs : null;
 }
 
+// single attacking-type vs single defending-type multiplier in the active ruleset
+function atkMult(atkType, defType, prof) {
+  prof = prof ?? state.profile;
+  if (isHack(prof)) {
+    const hd = HD(prof);
+    if (!hd) return 1;
+    const ai = Object.keys(hd.types).find((k) => hd.types[k].name === atkType);
+    const di = Object.keys(hd.types).find((k) => hd.types[k].name === defType);
+    if (ai == null || di == null || !hd.types[ai].matchup) return 1;
+    return RR_MULT[hd.types[ai].matchup[di]] ?? 1;
+  }
+  const tid = toID(defType);
+  let taken = (D.typechart[tid] || {}).damageTaken || {};
+  const chartOv = (modsFor(prof) || {}).typechart;
+  if (chartOv && chartOv[tid] && chartOv[tid].damageTaken) taken = Object.assign({}, taken, chartOv[tid].damageTaken);
+  return OFF_MULT[taken[atkType]] ?? 1;
+}
+
 // ---------- evolutions ----------
 function offEvoText(e) {
   const c = e.evoCondition ? ' ' + e.evoCondition : '';
@@ -1262,6 +1280,36 @@ function openSpecies(rec) {
             : 'Lv ' + (x.lo === x.hi ? x.lo : x.lo + '–' + x.hi)))))));
     }
 
+    // official-game wild locations (base forms; PokeAPI data)
+    if (rec.src === 'off' && prof !== 'pokopia' && !rec.e.forme) {
+      const all = (D.enc || {})[natNumOf(rec)];
+      if (all) {
+        const gensAvail = Object.keys(all).map(Number).sort((a, b) => a - b);
+        const g = profGen(prof);
+        const curGen = all[g] ? g : ((prof ?? state.profile) === 'nat' ? gensAvail[gensAvail.length - 1] : null);
+        const encRow = (r) => el('div', { class: 'kv' },
+          el('span', { class: 'k' },
+            el('span', { style: 'color:var(--text)' }, r[0]),
+            el('span', { style: 'display:block;font-size:11px' }, r[4])),
+          el('span', { style: 'text-align:right;flex:0 0 auto' }, r[1] + ' · Lv ' + (r[2] === r[3] ? r[2] : r[2] + '–' + r[3])));
+        const card = el('div', { class: 'card' }, el('h3', {}, 'Wild Locations' + (curGen ? ' · Gen ' + curGen : '')));
+        if (curGen) card.append(...all[curGen].map(encRow));
+        else card.append(el('div', { class: 'muted' }, 'Not found in the wild in ' + profLabel(prof) + '.'));
+        const others = gensAvail.filter((x) => x !== curGen);
+        if (others.length) {
+          const wrap = el('div', { style: 'display:none' },
+            others.map((og) => [el('h3', { style: 'margin-top:12px' }, 'Gen ' + og), all[og].map(encRow)]));
+          const btn = el('button', { class: 'chip', style: 'margin-top:10px', onclick: () => {
+            const open = wrap.style.display === 'none';
+            wrap.style.display = open ? 'block' : 'none';
+            btn.textContent = open ? 'Hide other generations' : 'Other generations (' + others.length + ')';
+          } }, 'Other generations (' + others.length + ')');
+          card.append(btn, wrap);
+        }
+        page.append(card);
+      }
+    }
+
     const ls = getLearnset(rec, prof);
     const segs = [['level', 'Level Up'], ['machine', 'TM/HM'], ['tutor', 'Tutor'], ['egg', 'Egg']];
     let cur = 'level';
@@ -1604,7 +1652,127 @@ function viewTeams() {
     el('header', {}, el('div', { class: 'hrow' }, el('div', { class: 'htitle' }, 'Teams'), fullscreenBtn(), rotomBtn(), profileSelect())),
     el('main', {}, el('div', { class: 'page' },
       el('button', { class: 'btn', onclick: () => { state.teamOpen = newTeam(); render(); } }, '+ New Team (' + profLabel() + ')'),
+      el('button', { class: 'btn sec', onclick: openDamageCalc }, '⚔ Damage Calculator'),
       list)));
+}
+
+// ---------- damage calculator ----------
+function openDamageCalc() {
+  const prof = state.profile;
+  const side = (label) => ({ rec: null, level: 100, invest: true, boostNature: false, label });
+  const A = side('Attacker'), B = side('Defender');
+  let move = null, crit = false, itemMod = 1, screen = false, weatherMod = 1;
+
+  openSheet('Damage Calculator', (body) => {
+    const out = el('div', { class: 'card' }, el('h3', {}, 'Result'),
+      el('div', { class: 'muted' }, 'Pick an attacker, a move, and a defender.'));
+
+    function calc() {
+      out.textContent = '';
+      out.append(el('h3', {}, 'Result'));
+      if (!A.rec || !B.rec || !move) {
+        out.append(el('div', { class: 'muted' }, 'Pick an attacker, a move, and a defender.'));
+        return;
+      }
+      if (!move.power) {
+        out.append(el('div', { class: 'muted' }, move.name + ' deals no direct damage.'));
+        return;
+      }
+      const phys = move.cat === 'Physical';
+      const atkKey = phys ? 'atk' : 'spa', defKey = phys ? 'def' : 'spd';
+      const atkStat = calcStat(atkKey, A.rec.stats[atkKey], 31, A.invest ? 252 : 0, A.level,
+        A.boostNature ? NATURES[NATURE_ORDER.indexOf(atkKey) * 5 + (NATURE_ORDER.indexOf(atkKey) + 1) % 5] : 'Hardy');
+      const defStat = calcStat(defKey, B.rec.stats[defKey], 31, B.invest ? 252 : 0, B.level,
+        B.boostNature ? NATURES[NATURE_ORDER.indexOf(defKey) * 5 + (NATURE_ORDER.indexOf(defKey) + 1) % 5] : 'Hardy');
+      const hp = calcStat('hp', B.rec.stats.hp, 31, B.invest ? 252 : 0, B.level, 'Hardy');
+      const stab = A.rec.types.includes(move.type) ? 1.5 : 1;
+      let eff = 1;
+      for (const t of B.rec.types) eff *= atkMult(move.type, t, prof);
+      const base = Math.floor(Math.floor((2 * A.level / 5 + 2) * move.power * atkStat / defStat) / 50) + 2;
+      const mods = (crit ? 1.5 : 1) * itemMod * (screen && !crit ? 0.5 : 1) * weatherMod * stab * eff;
+      const lo = Math.floor(base * 0.85 * mods), hi = Math.floor(base * mods);
+      const loP = (lo / hp * 100), hiP = (hi / hp * 100);
+      const ko = hiP <= 0 ? '' : loP >= 100 ? 'Guaranteed OHKO' : hiP >= 100 ? 'Possible OHKO'
+        : loP >= 50 ? 'Guaranteed 2HKO' : hiP >= 50 ? 'Possible 2HKO'
+        : 'Needs ' + Math.ceil(100 / hiP) + '–' + Math.ceil(100 / Math.max(loP, 0.01)) + ' hits';
+      if (eff === 0) {
+        out.append(el('div', {}, B.rec.name + ' is immune to ' + move.type + ' moves.'));
+        return;
+      }
+      out.append(
+        el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Damage'), el('span', {}, lo + ' – ' + hi + ' (of ' + hp + ' HP)')),
+        el('div', { class: 'kv' }, el('span', { class: 'k' }, '%'), el('span', {}, loP.toFixed(1) + '% – ' + hiP.toFixed(1) + '%')),
+        el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Effectiveness'), el('span', {}, '×' + eff + (stab > 1 ? ' + STAB' : ''))),
+        el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Verdict'), el('span', {}, ko)),
+        el('div', { class: 'muted', style: 'font-size:11px;margin-top:8px' },
+          'Approximate: 31 IVs, no abilities/stat stages. Investment toggle = 252 EVs in the relevant stat.'));
+    }
+
+    function sideCard(S, isAtk) {
+      const pickBtn = el('button', { class: 'fsel', onclick: () => {
+        pickerSheet('Choose ' + S.label,
+          speciesList(prof).map((r) => ({ label: r.name, sub: r.dexno + ' · BST ' + r.bst, rec: r, value: r })),
+          (r) => {
+            S.rec = r;
+            pickBtn.firstChild.textContent = r.name;
+            if (isAtk) { move = null; moveBtn.firstChild.textContent = 'Choose move…'; }
+            calc();
+          });
+      } }, el('span', { class: 'v' }, 'Choose Pokémon…'), el('span', { class: 'muted' }, '›'));
+      const lvl = el('input', { class: 'fsel', type: 'number', min: 1, max: 100, value: S.level,
+        oninput: () => { S.level = Math.max(1, Math.min(100, +lvl.value || 100)); calc(); } });
+      const investBtn = el('button', { class: 'chip on', style: 'background:var(--accent2)', onclick: () => {
+        S.invest = !S.invest;
+        investBtn.classList.toggle('on', S.invest);
+        investBtn.style.background = S.invest ? 'var(--accent2)' : '';
+        calc();
+      } }, '252 EVs');
+      const natBtn = el('button', { class: 'chip', onclick: () => {
+        S.boostNature = !S.boostNature;
+        natBtn.classList.toggle('on', S.boostNature);
+        natBtn.style.background = S.boostNature ? 'var(--accent2)' : '';
+        calc();
+      } }, '+Nature');
+      const kids = [
+        el('div', { class: 'field' }, el('label', {}, 'Pokémon'), pickBtn),
+        el('div', { class: 'field' }, el('label', {}, 'Level'), lvl),
+        el('div', { class: 'moveinline' }, investBtn, natBtn),
+      ];
+      return el('div', { class: 'card' }, el('h3', {}, S.label), kids);
+    }
+
+    const moveBtn = el('button', { class: 'fsel', onclick: () => {
+      if (!A.rec) { alert('Pick the attacker first.'); return; }
+      const legal = legalMoves(A.rec, prof).filter((mv) => mv.power > 0);
+      pickerSheet('Choose Move',
+        legal.map((mv) => ({ label: mv.name, sub: mv.type + ' · ' + mv.cat + ' · ' + mv.power + ' BP', value: mv })),
+        (mv) => { move = mv; moveBtn.firstChild.textContent = mv.name + ' (' + mv.power + ' BP ' + mv.type + ')'; calc(); });
+    } }, el('span', { class: 'v' }, 'Choose move…'), el('span', { class: 'muted' }, '›'));
+
+    const toggles = el('div', { class: 'moveinline' },
+      [['Crit', () => { crit = !crit; return crit; }],
+       ['Item ×1.5', () => { itemMod = itemMod === 1.5 ? 1 : 1.5; return itemMod > 1; }],
+       ['Screen', () => { screen = !screen; return screen; }],
+       ['Weather +', () => { weatherMod = weatherMod === 1.5 ? 1 : 1.5; return weatherMod > 1; }],
+       ['Weather −', () => { weatherMod = weatherMod === 0.5 ? 1 : 0.5; return weatherMod < 1; }],
+      ].map(([label, fn]) => {
+        const b = el('button', { class: 'chip', onclick: () => {
+          const on = fn();
+          b.classList.toggle('on', on);
+          b.style.background = on ? 'var(--accent2)' : '';
+          calc();
+        } }, label);
+        return b;
+      }));
+
+    body.append(el('div', { class: 'page' },
+      sideCard(A, true),
+      el('div', { class: 'card' }, el('h3', {}, 'Move'),
+        el('div', { class: 'field' }, el('label', {}, 'Attacker’s move'), moveBtn),
+        toggles),
+      sideCard(B, false),
+      out));
+  });
 }
 function viewTeamEditor(ti) {
   const team = teams[ti];
@@ -1632,7 +1800,8 @@ function viewTeamEditor(ti) {
       el('span', { class: 'si' }, [mon.item, mon.ability].filter(Boolean).join(' · ') || 'Tap to edit')));
   });
 
-  const covered = team.mons.filter(Boolean).map((m) => getSpecies(m.sp, team.profile)).filter(Boolean);
+  const filledMons = team.mons.filter(Boolean);
+  const covered = filledMons.map((m) => getSpecies(m.sp, team.profile)).filter(Boolean);
   const cov = el('div', { class: 'covgrid' });
   for (const t of typesFor(team.profile)) {
     let weak = 0, res = 0;
@@ -1645,10 +1814,33 @@ function viewTeamEditor(ti) {
       el('div', { class: 'cv' }, weak + ' / ' + res)));
   }
 
+  // offensive: attack types = damaging chosen moves, else STAB fallback
+  const atkTypesPer = filledMons.map((mon) => {
+    const rec = getSpecies(mon.sp, team.profile);
+    if (!rec) return [];
+    const moveTypes = (mon.moves || []).filter(Boolean)
+      .map((k) => getMove(k, team.profile)).filter((mv) => mv && mv.power > 0).map((mv) => mv.type);
+    return moveTypes.length ? [...new Set(moveTypes)] : rec.types;
+  });
+  const offCov = el('div', { class: 'covgrid' });
+  for (const t of typesFor(team.profile)) {
+    let hitters = 0;
+    for (const types of atkTypesPer) {
+      if (types.some((a) => atkMult(a, t, team.profile) > 1)) hitters++;
+    }
+    offCov.append(el('div', { class: 'covcell', style: 'background:' + (TYPE_COLORS[t] || '#68A090') },
+      el('div', { class: 'ct' }, t.slice(0, 3)),
+      el('div', { class: 'cv' }, String(hitters))));
+  }
+
   page.append(
     el('div', { class: 'field' }, el('label', {}, 'Team name'), nameInput),
     slots,
     covered.length ? el('div', { class: 'card' }, el('h3', {}, 'Defensive Coverage (weak / resist)'), cov) : null,
+    covered.length ? el('div', { class: 'card' },
+      el('h3', {}, 'Offensive Coverage (hit super-effectively by)'),
+      offCov,
+      el('div', { class: 'muted', style: 'font-size:11px;margin-top:8px' }, 'Uses each member’s damaging moves; STAB types when no moves are set.')) : null,
     el('div', { class: 'btnrow' },
       el('button', { class: 'btn sec', onclick: async () => {
         const txt = exportShowdown(team);
@@ -1789,6 +1981,12 @@ function openMonEditor(team, si, done) {
 // ============================== boot =====================================
 bootEl.remove();
 render();
+
+// offline support when self-hosted (sw.js only exists on the Pages deploy;
+// registration failing elsewhere is expected and harmless)
+if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
 
 } catch (err) {
   if (bootEl) bootEl.textContent = '';
