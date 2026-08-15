@@ -873,6 +873,34 @@ function openSheet(title, build) {
         el('button', { class: 'back', title: 'Back to the list', onclick: () => closeAllSheets() }, '✕'))),
     body);
   const sheet = el('div', { class: 'sheet', onclick: (ev) => { if (ev.target === sheet) closeSheet(sheet); } }, panel);
+
+  // iOS-style edge-swipe to go back one page
+  let sx = 0, sy = 0, dragging = false;
+  sheet.addEventListener('touchstart', (ev) => {
+    const t = ev.touches[0];
+    if (t.clientX <= 30) { sx = t.clientX; sy = t.clientY; dragging = true; panel.style.transition = 'none'; }
+  }, { passive: true });
+  sheet.addEventListener('touchmove', (ev) => {
+    if (!dragging) return;
+    const t = ev.touches[0];
+    const dx = Math.max(0, t.clientX - sx), dy = Math.abs(t.clientY - sy);
+    if (dy > 70 && dx < 40) { dragging = false; panel.style.transform = ''; return; } // vertical scroll wins
+    panel.style.transform = 'translateX(' + dx + 'px)';
+  }, { passive: true });
+  sheet.addEventListener('touchend', (ev) => {
+    if (!dragging) return;
+    dragging = false;
+    const dx = ev.changedTouches[0].clientX - sx;
+    panel.style.transition = 'transform .18s ease-out';
+    if (dx > 90) {
+      panel.style.transform = 'translateX(110vw)';
+      setTimeout(() => closeSheet(sheet), 170);
+    } else {
+      panel.style.transform = 'translateX(0)';
+      setTimeout(() => { panel.style.transform = ''; panel.style.transition = ''; }, 200);
+    }
+  });
+
   document.body.append(sheet);
   sheetStack.push(sheet);
   build(body, sheet);
