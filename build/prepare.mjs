@@ -325,6 +325,60 @@ try {
     enc[num] = byGen;
   }
 } catch (e) { console.warn('encounters skipped:', e.message); }
+// Gen 9 (SV + DLC) locations from Serebii's pokedex-sv pages — neither
+// PokeAPI nor PokemonDB has them. Rows use lo=hi=0 (no level data).
+let svRows = 0, svFlavor = 0, zaFlavor = 0;
+try {
+  for (const f of fs.readdirSync(path.join(root, 'data/sv'))) {
+    const num = parseInt(f);
+    if (!num || !f.endsWith('.html')) continue;
+    const parts = fs.readFileSync(path.join(root, 'data/sv', f), 'utf8').split('Locations</h2>');
+    if (parts.length < 2) continue;
+    const sec = parts[1].split('</table>')[0];
+    const merged = {}; // area -> Set(games)
+    let dlc = '';
+    for (const rowHtml of sec.split('<tr>').slice(1)) {
+      const dlcM = rowHtml.match(/<td class="(?:tid|ttm)"[^>]*>([^<]+)<\/td>/);
+      if (dlcM) dlc = dec(dlcM[1]);
+      else if (/<td class="(?:scarlet|violet)" colspan/.test(rowHtml)) dlc = '';
+      const gameM = rowHtml.match(/<td class="(scarlet|violet)"[^>]*>(Scarlet|Violet)<\/td>/);
+      if (!gameM) continue;
+      const info = (rowHtml.match(/<td class="fooinfo"[^>]*>([\s\S]*?)<\/td>/) || [])[1] || '';
+      const areas = [...info.matchAll(/<a href="\/pokearth\/[^"]+">([^<]+)<\/a>/g)].map((m) => dec(m[1]));
+      const label = (dlc ? dlc + ' ' : '') + gameM[2];
+      for (const area of areas) (merged[(dlc ? dlc + ' · ' : '') + area] = merged[(dlc ? dlc + ' · ' : '') + area] || new Set()).add(gameM[2]);
+    }
+    const rows = Object.entries(merged).map(([area, games]) => [area, '', 0, 0, [...games].join('/')]);
+    if (rows.length) {
+      const byGen = (enc[num] = enc[num] || {});
+      const existing = new Set((byGen[9] || []).map((r) => r[0]));
+      byGen[9] = [...(byGen[9] || []), ...rows.filter((r) => !existing.has(r[0]))];
+      byGen[9].sort((a, b) => a[0].localeCompare(b[0]));
+      svRows += rows.length;
+    }
+
+    // same pages carry SV + Legends: Z-A flavor text (Z-A is nowhere else)
+    const fparts = fs.readFileSync(path.join(root, 'data/sv', f), 'utf8').split('Flavor Text');
+    if (fparts.length > 1) {
+      const fsec = fparts[1].split('</table>')[0];
+      const grab = (cls) => {
+        const m = fsec.match(new RegExp('<td class="' + cls + '"[^>]*>[^<]*</td>\\s*<td class="fooinfo"[^>]*>([\\s\\S]*?)</td>'));
+        return m ? dec(m[1]) : null;
+      };
+      const sv = grab('violet') || grab('scarlet');
+      const za = grab('fooza');
+      if (sv || za) {
+        const fl = (flavor[num] = flavor[num] || { g: '', t: {} });
+        if (sv && !fl.t[9]) { fl.t[9] = sv; svFlavor++; }
+        if (za && !(fl.x || []).some((e) => e.g === 'Legends: Z-A')) {
+          (fl.x = fl.x || []).push({ g: 'Legends: Z-A', text: za });
+          zaFlavor++;
+        }
+      }
+    }
+  }
+} catch (e) { console.warn('sv locations skipped:', e.message); }
+console.log(`sv locations merged: ${svRows} rows; flavor filled: ${svFlavor} SV, ${zaFlavor} Z-A`);
 console.log(`encounters: ${Object.keys(enc).length} species, ${encRows} rows`);
 
 const payload = { dex, moves, learnsets, abilities, items, typechart, iconIdx, rr, mods, flavor, hacks,

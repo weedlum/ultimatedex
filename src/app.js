@@ -543,9 +543,10 @@ function flavorAll(rec) {
     const t = f.t[g];
     if (!t) continue;
     const last = groups[groups.length - 1];
-    if (last && last.text === t) last.gens.push(g);
+    if (last && last.text === t && !last.label) last.gens.push(g);
     else groups.push({ gens: [g], text: t });
   }
+  for (const e of f.x || []) groups.push({ gens: [], label: e.g, text: e.text });
   return groups;
 }
 function hackChanges(rec) {
@@ -1159,7 +1160,7 @@ function openSpecies(rec) {
         const wrap = el('div', { style: 'display:none' },
           groups.map((g) => [
             el('h3', { style: 'margin-top:12px' },
-              'Gen ' + (g.gens.length > 1 ? g.gens[0] + '–' + g.gens[g.gens.length - 1] : g.gens[0])),
+              g.label || 'Gen ' + (g.gens.length > 1 ? g.gens[0] + '–' + g.gens[g.gens.length - 1] : g.gens[0])),
             el('div', { class: 'flavor' }, g.text)]));
         const btn = el('button', { class: 'chip', style: 'margin-top:10px', onclick: () => {
           const open = wrap.style.display === 'none';
@@ -1291,7 +1292,8 @@ function openSpecies(rec) {
           el('span', { class: 'k' },
             el('span', { style: 'color:var(--text)' }, r[0]),
             el('span', { style: 'display:block;font-size:11px' }, r[4])),
-          el('span', { style: 'text-align:right;flex:0 0 auto' }, r[1] + ' · Lv ' + (r[2] === r[3] ? r[2] : r[2] + '–' + r[3])));
+          el('span', { style: 'text-align:right;flex:0 0 auto' },
+            [r[1], r[2] || r[3] ? 'Lv ' + (r[2] === r[3] ? r[2] : r[2] + '–' + r[3]) : ''].filter(Boolean).join(' · ') || 'Wild'));
         const card = el('div', { class: 'card' }, el('h3', {}, 'Wild Locations' + (curGen ? ' · Gen ' + curGen : '')));
         if (curGen) card.append(...all[curGen].map(encRow));
         else card.append(el('div', { class: 'muted' }, 'Not found in the wild in ' + profLabel(prof) + '.'));
