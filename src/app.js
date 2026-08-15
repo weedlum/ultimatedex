@@ -1988,6 +1988,16 @@ render();
 // registration failing elsewhere is expected and harmless)
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
+  navigator.serviceWorker.addEventListener('message', (ev) => {
+    if (!ev.data || !ev.data.udUpdate || document.getElementById('udupdate')) return;
+    document.body.append(el('button', {
+      id: 'udupdate', class: 'chip on',
+      style: 'position:fixed;left:50%;transform:translateX(-50%);z-index:90;' +
+        'bottom:calc(env(safe-area-inset-bottom) + 84px);background:var(--accent2);color:#fff;' +
+        'box-shadow:0 6px 20px rgb(0 0 0 / .4);padding:9px 16px;font-size:13px',
+      onclick: () => location.reload(),
+    }, '⬆ Update ready — tap to refresh'));
+  });
 }
 
 } catch (err) {
